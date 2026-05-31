@@ -12,7 +12,7 @@ st.set_page_config(page_title="Casing Integrity 3D Viewer", layout="wide")
 st.title("Casing Integrity 3D Viewer")
 st.caption(
     "Sube un archivo LAS, Excel o CSV del registro caliper. "
-    "La app diferencia picos puntuales de problemas sostenidos del casing."
+    "La app diferencia picos puntuales, problemas sostenidos e intervalos marcados manualmente."
 )
 
 
@@ -29,7 +29,7 @@ RANGOS_PROBLEMA = pd.DataFrame(
         {
             "Clase": "Moderado",
             "Rango": "35 a < 60 %",
-            "Interpretación": "Revisar tendencia o intervalo"
+            "Interpretación": "Revisar tendencia, pico o intervalo"
         },
         {
             "Clase": "Crítico",
@@ -39,7 +39,7 @@ RANGOS_PROBLEMA = pd.DataFrame(
         {
             "Clase": "Severo",
             "Rango": "80 a 100 %",
-            "Interpretación": "Alta probabilidad de restricción, deformación, desgaste severo o daño sostenido"
+            "Interpretación": "Alta probabilidad de restricción, deformación, desgaste severo o intervalo crítico marcado"
         },
     ]
 )
@@ -292,6 +292,9 @@ def suavizar_sostenido(serie, ventana_puntos):
 def crear_motivo(row):
     motivos = []
 
+    if row["manual_alert_pct"] > 0:
+        motivos.append("intervalo marcado manualmente por indicio visual o reporte")
+
     if row["wear_score_sustained_pct"] >= 35:
         motivos.append("aumento sostenido de IDMX o desgaste")
 
@@ -307,7 +310,7 @@ def crear_motivo(row):
     if row["jump_score_sustained_pct"] >= 35:
         motivos.append("cambio brusco sostenido")
 
-    if row["spike_score_pct"] >= 60 and row["problem_score_pct"] < 35:
+    if row["spike_score_pct"] >= 60 and row["problem_score_calc_pct"] < 35:
         motivos.append("pico puntual de lectura, revisar como posible ruido, collar, suciedad o centralización")
 
     if not motivos:
@@ -317,10 +320,15 @@ def crear_motivo(row):
 
 
 def tipo_alerta(row):
-    if row["problem_score_pct"] >= 60:
+    if row["manual_alert_pct"] >= 60:
+        return "Intervalo marcado"
+
+    if row["problem_score_calc_pct"] >= 60:
         return "Problema sostenido"
-    if row["problem_score_pct"] >= 35:
+
+    if row["problem_score_calc_pct"] >= 35:
         return "Tendencia moderada"
+
     if row["spike_score_pct"] >= 60:
         return "Pico puntual"
 
@@ -340,7 +348,11 @@ def procesar_datos(
     ovality_ref,
     eccentricity_ref,
     jump_ref,
-    ventana_sostenida_ft
+    ventana_sostenida_ft,
+    usar_intervalo_manual,
+    manual_from_ft,
+    manual_to_ft,
+    manual_score_pct
 ):
     data = pd.DataFrame()
 
@@ -456,13 +468,32 @@ def procesar_datos(
         ]
     ].max(axis=1)
 
-    data["problem_score_pct"] = data[
+    data["problem_score_calc_pct"] = data[
         [
             "wear_score_sustained_pct",
             "restriction_score_sustained_pct",
             "ovality_score_sustained_pct",
             "eccentricity_score_sustained_pct",
             "jump_score_sustained_pct"
+        ]
+    ].max(axis=1)
+
+    if usar_intervalo_manual:
+        desde = min(manual_from_ft, manual_to_ft)
+        hasta = max(manual_from_ft, manual_to_ft)
+
+        data["manual_alert_pct"] = np.where(
+            (data["depth_ft"] >= desde) & (data["depth_ft"] <= hasta),
+            manual_score_pct,
+            0.0
+        )
+    else:
+        data["manual_alert_pct"] = 0.0
+
+    data["problem_score_pct"] = data[
+        [
+            "problem_score_calc_pct",
+            "manual_alert_pct"
         ]
     ].max(axis=1)
 
@@ -484,7 +515,9 @@ def textos_hover(data):
             f"<b>Lectura del casing</b><br>"
             f"MD: {fmt(row['depth_ft'], 2, ' ft')}<br>"
             f"Tipo de alerta: {row['alert_type']}<br>"
-            f"Problema sostenido: {fmt(row['problem_score_pct'], 1, ' %')}<br>"
+            f"Problema mostrado: {fmt(row['problem_score_pct'], 1, ' %')}<br>"
+            f"Problema calculado: {fmt(row['problem_score_calc_pct'], 1, ' %')}<br>"
+            f"Intervalo manual: {fmt(row['manual_alert_pct'], 1, ' %')}<br>"
             f"Pico puntual: {fmt(row['spike_score_pct'], 1, ' %')}<br>"
             f"Clasificación: {row['problem_class']}<br>"
             f"Desgaste por IDMX: {fmt(row['metal_loss_pct'], 1, ' %')}<br>"
@@ -565,7 +598,6 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
     score_grid = np.repeat(score.reshape(-1, 1), x.shape[1], axis=1)
 
     textos = textos_hover(data_plot)
-    hover_grid = np.repeat(np.array(textos, dtype=object).reshape(-1, 1), x.shape[1], axis=1)
 
     fig = go.Figure()
 
@@ -575,7 +607,6 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
             y=y,
             z=z,
             surfacecolor=score_grid,
-            text=hover_grid,
             cmin=0,
             cmax=100,
             colorscale=[
@@ -586,18 +617,17 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
                 [1.00, "red"],
             ],
             colorbar=dict(
-                title="Problema sostenido %",
+                title="Problema mostrado %",
                 tickvals=[17.5, 47.5, 70, 90],
                 ticktext=["Bajo", "Moderado", "Crítico", "Severo"]
             ),
-            hovertemplate="%{text}<extra></extra>",
-            hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
+            hoverinfo="skip",
             name="Casing"
         )
     )
 
     cantidad_angulos = x.shape[1]
-    angulos_lectura = np.linspace(0, cantidad_angulos - 1, min(16, cantidad_angulos)).astype(int)
+    angulos_lectura = np.linspace(0, cantidad_angulos - 1, min(24, cantidad_angulos)).astype(int)
 
     x_hover = x[:, angulos_lectura].reshape(-1)
     y_hover = y[:, angulos_lectura].reshape(-1)
@@ -613,7 +643,7 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
             z=z_hover,
             mode="markers",
             marker=dict(
-                size=4,
+                size=7,
                 color=score_hover,
                 colorscale=[
                     [0.00, "green"],
@@ -624,10 +654,10 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
                 ],
                 cmin=0,
                 cmax=100,
-                opacity=0.35
+                opacity=0.22
             ),
-            text=textos_hover_superficie,
-            hovertemplate="%{text}<extra></extra>",
+            hovertext=textos_hover_superficie,
+            hovertemplate="%{hovertext}<extra></extra>",
             hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
             name="Lectura sobre casing",
             showlegend=True
@@ -637,8 +667,8 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
     crit = data_plot[data_plot["problem_score_pct"] >= umbral_problema].copy()
 
     if not crit.empty:
-        if len(crit) > 120:
-            crit = crit.sort_values("problem_score_pct", ascending=False).head(120)
+        if len(crit) > 160:
+            crit = crit.sort_values("problem_score_pct", ascending=False).head(160)
             crit = crit.sort_values("depth_ft")
 
         radio_maximo = np.nanmax(np.sqrt(x ** 2 + y ** 2))
@@ -651,17 +681,17 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
                 z=crit["depth_ft"],
                 mode="markers",
                 marker=dict(
-                    size=6,
+                    size=7,
                     color=crit["problem_score_pct"],
                     colorscale="Turbo",
                     cmin=0,
                     cmax=100,
                     symbol="diamond"
                 ),
-                text=textos_hover(crit),
-                hovertemplate="%{text}<extra></extra>",
+                hovertext=textos_hover(crit),
+                hovertemplate="%{hovertext}<extra></extra>",
                 hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
-                name="Alertas sostenidas"
+                name="Alertas"
             )
         )
 
@@ -692,7 +722,8 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
             aspectratio=dict(x=1, y=1, z=4),
         ),
         margin=dict(l=0, r=0, t=60, b=0),
-        legend=dict(orientation="h")
+        legend=dict(orientation="h"),
+        hovermode="closest"
     )
 
     return fig
@@ -702,7 +733,9 @@ def grafico_tracks(data, umbral_problema):
     fig = go.Figure()
 
     curvas = [
-        ("problem_score_pct", "Problema sostenido, %"),
+        ("problem_score_pct", "Problema mostrado, %"),
+        ("problem_score_calc_pct", "Problema calculado, %"),
+        ("manual_alert_pct", "Intervalo manual, %"),
         ("spike_score_pct", "Pico puntual, %"),
         ("metal_loss_pct", "Desgaste por IDMX, %"),
         ("restriction_score_sustained_pct", "Restricción IDMN sostenida, %"),
@@ -728,7 +761,7 @@ def grafico_tracks(data, umbral_problema):
     )
 
     fig.update_layout(
-        height=580,
+        height=600,
         yaxis=dict(title="MD, ft", autorange="reversed"),
         xaxis=dict(title="Score / porcentaje, %", range=[0, 100]),
         legend=dict(orientation="h"),
@@ -780,6 +813,8 @@ def crear_intervalo(b):
         "to_ft": b["depth_ft"].max(),
         "longitud_ft": b["depth_ft"].max() - b["depth_ft"].min(),
         "max_problem_score_pct": b["problem_score_pct"].max(),
+        "max_problem_calc_pct": b["problem_score_calc_pct"].max(),
+        "max_manual_alert_pct": b["manual_alert_pct"].max(),
         "max_spike_score_pct": b["spike_score_pct"].max(),
         "max_metal_loss_pct": b["metal_loss_pct"].max(),
         "max_restriction_score_pct": b["restriction_score_sustained_pct"].max(),
@@ -837,6 +872,11 @@ except Exception as e:
     st.stop()
 
 
+nombre_archivo = archivo.name.upper()
+pozo_detectado = str(meta.get("pozo", "")).upper()
+es_aa9891 = "AA9891" in nombre_archivo or "AA9891" in pozo_detectado
+
+
 st.sidebar.header("Datos del casing")
 
 case_od = st.sidebar.number_input(
@@ -863,7 +903,7 @@ nominal_id = st.sidebar.number_input(
 st.sidebar.header("Criterios de alerta")
 
 umbral_problema = st.sidebar.slider(
-    "Umbral de problema sostenido, %",
+    "Umbral de problema mostrado, %",
     10,
     100,
     60
@@ -906,6 +946,34 @@ jump_ref = st.sidebar.number_input(
     format="%.3f"
 )
 
+st.sidebar.header("Intervalo de interés manual")
+
+usar_intervalo_manual = st.sidebar.checkbox(
+    "Marcar intervalo manual en 3D",
+    value=es_aa9891
+)
+
+manual_from_ft = st.sidebar.number_input(
+    "Desde, ft",
+    value=350.0,
+    step=1.0,
+    format="%.1f"
+)
+
+manual_to_ft = st.sidebar.number_input(
+    "Hasta, ft",
+    value=425.0,
+    step=1.0,
+    format="%.1f"
+)
+
+manual_score_pct = st.sidebar.slider(
+    "Intensidad intervalo manual, %",
+    0,
+    100,
+    85
+)
+
 max_points = st.sidebar.slider(
     "Puntos máximos para 3D",
     200,
@@ -928,12 +996,12 @@ st.write(f"Pozo: **{meta.get('pozo', '')}**")
 st.write(f"Campo: **{meta.get('campo', '')}**")
 
 
-st.subheader("Rangos de clasificación del problema sostenido")
+st.subheader("Rangos de clasificación del problema mostrado")
 st.dataframe(RANGOS_PROBLEMA, use_container_width=True, hide_index=True)
 
 st.caption(
-    "Nota técnica: el score de problema sostenido no es un porcentaje directo de rotura. "
-    "Es un índice de alerta calculado con una ventana móvil para reducir falsos positivos por picos puntuales."
+    "Nota técnica: el score mostrado combina el cálculo del LAS con el intervalo manual, cuando está activado. "
+    "El intervalo manual sirve para marcar zonas observadas en el registro gráfico o en el reporte."
 )
 
 
@@ -995,7 +1063,11 @@ try:
         ovality_ref,
         eccentricity_ref,
         jump_ref,
-        ventana_sostenida_ft
+        ventana_sostenida_ft,
+        usar_intervalo_manual,
+        manual_from_ft,
+        manual_to_ft,
+        manual_score_pct
     )
 except Exception as e:
     st.error(f"No pude procesar los datos: {e}")
@@ -1029,8 +1101,8 @@ k1, k2, k3, k4, k5, k6 = st.columns(6)
 
 k1.metric("MD inicial", f"{data_filtrada['depth_ft'].min():.2f} ft")
 k2.metric("MD final", f"{data_filtrada['depth_ft'].max():.2f} ft")
-k3.metric("Máx. problema sostenido", f"{data_filtrada['problem_score_pct'].max():.1f} %")
-k4.metric("Máx. pico puntual", f"{data_filtrada['spike_score_pct'].max():.1f} %")
+k3.metric("Máx. problema mostrado", f"{data_filtrada['problem_score_pct'].max():.1f} %")
+k4.metric("Máx. problema calculado", f"{data_filtrada['problem_score_calc_pct'].max():.1f} %")
 k5.metric("Menor IDMN", f"{data_filtrada['id_min_in'].min():.3f} in")
 k6.metric("Integridad mínima", f"{data_filtrada['integrity_pct'].min():.1f} %")
 
@@ -1044,10 +1116,18 @@ if fuera_rango > 0:
     )
 
 
-st.subheader("Tubular 3D coloreado por problema sostenido del casing")
+if usar_intervalo_manual:
+    st.warning(
+        f"Intervalo manual activado: {manual_from_ft:.1f} ft a {manual_to_ft:.1f} ft "
+        f"con intensidad {manual_score_pct} %. Esta marca viene de interpretación visual o reporte, "
+        "no del cálculo automático puro del LAS."
+    )
+
+
+st.subheader("Tubular 3D coloreado por problema mostrado")
 st.info(
-    "Pasa el cursor directamente sobre el casing 3D para ver MD, tipo de alerta, problema sostenido, "
-    "pico puntual, desgaste, integridad, IDMN, IDAV, IDMX, espesor remanente y motivo probable."
+    "Pasa el cursor sobre los puntos coloreados de la pared del casing para ver la lectura. "
+    "Ya no necesitas usar la línea negra central."
 )
 
 st.plotly_chart(
@@ -1056,7 +1136,7 @@ st.plotly_chart(
 )
 
 
-st.subheader("Tracks de problema sostenido, picos puntuales y variables de casing")
+st.subheader("Tracks de problema mostrado, cálculo LAS e intervalo manual")
 st.plotly_chart(grafico_tracks(data_filtrada, umbral_problema), use_container_width=True)
 
 
@@ -1064,23 +1144,27 @@ st.subheader("Tracks IDMN, IDAV e IDMX")
 st.plotly_chart(grafico_id(data_filtrada), use_container_width=True)
 
 
-st.subheader("Profundidades con mayor problema sostenido")
+st.subheader("Profundidades con mayor problema mostrado")
 
 top = data_filtrada.sort_values(
     [
         "problem_score_pct",
+        "manual_alert_pct",
+        "problem_score_calc_pct",
         "restriction_score_sustained_pct",
         "ovality_score_sustained_pct",
         "metal_loss_pct",
         "eccentricity_score_sustained_pct"
     ],
-    ascending=[False, False, False, False, False]
+    ascending=[False, False, False, False, False, False, False]
 ).head(30)
 
 columnas_top = [
     "depth_ft",
     "alert_type",
     "problem_score_pct",
+    "problem_score_calc_pct",
+    "manual_alert_pct",
     "spike_score_pct",
     "problem_class",
     "probable_cause",
@@ -1114,7 +1198,7 @@ if zona_350_450.empty:
     st.info("El archivo no contiene datos entre 350 ft y 450 ft.")
 else:
     st.dataframe(
-        zona_350_450.sort_values("problem_score_pct", ascending=False)[columnas_top].head(40).round(4),
+        zona_350_450.sort_values("problem_score_pct", ascending=False)[columnas_top].head(60).round(4),
         use_container_width=True
     )
 
@@ -1123,7 +1207,8 @@ st.subheader("Picos puntuales que NO necesariamente son daño sostenido")
 
 picos = data_filtrada[
     (data_filtrada["spike_score_pct"] >= 60) &
-    (data_filtrada["problem_score_pct"] < 35)
+    (data_filtrada["problem_score_calc_pct"] < 35) &
+    (data_filtrada["manual_alert_pct"] == 0)
 ].copy()
 
 if picos.empty:
@@ -1135,12 +1220,12 @@ else:
     )
 
 
-st.subheader("Intervalos críticos sostenidos")
+st.subheader("Intervalos críticos mostrados")
 
 intervalos = intervalos_criticos(data_filtrada, umbral_problema)
 
 if intervalos.empty:
-    st.success("No se detectaron intervalos sostenidos por encima del umbral seleccionado.")
+    st.success("No se detectaron intervalos por encima del umbral seleccionado.")
 else:
     st.dataframe(intervalos.round(4), use_container_width=True)
 
@@ -1151,6 +1236,8 @@ columnas_salida = [
     "depth_ft",
     "alert_type",
     "problem_score_pct",
+    "problem_score_calc_pct",
+    "manual_alert_pct",
     "spike_score_pct",
     "problem_class",
     "probable_cause",
@@ -1194,6 +1281,6 @@ csv = data_filtrada[columnas_salida].to_csv(index=False).encode("utf-8")
 st.download_button(
     "Descargar tabla procesada CSV",
     data=csv,
-    file_name="casing_integrity_sustained_problem_analysis.csv",
+    file_name="casing_integrity_final_analysis.csv",
     mime="text/csv"
 )
