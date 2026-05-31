@@ -288,24 +288,17 @@ def grafico_3d(data, max_points):
 
     desgaste_grid = np.repeat(desgaste.reshape(-1, 1), len(theta), axis=1)
 
-    custom_surface = np.stack(
-        [
-            desgaste_grid,
-            np.repeat(integridad.reshape(-1, 1), len(theta), axis=1),
-            np.repeat(espesor.reshape(-1, 1), len(theta), axis=1),
-            np.repeat(idmx.reshape(-1, 1), len(theta), axis=1),
-        ],
-        axis=-1
-    )
-
-    custom_centro = np.column_stack(
-        [
-            desgaste,
-            integridad,
-            espesor,
-            idmx
-        ]
-    )
+    texto_lectura = [
+        (
+            f"<b>Lectura del casing</b><br>"
+            f"MD: {depth[i]:.2f} ft<br>"
+            f"Desgaste: {desgaste[i]:.1f} %<br>"
+            f"Integridad: {integridad[i]:.1f} %<br>"
+            f"Espesor remanente: {espesor[i]:.3f} in<br>"
+            f"IDMX: {idmx[i]:.3f} in"
+        )
+        for i in range(len(depth))
+    ]
 
     fig = go.Figure()
 
@@ -315,7 +308,6 @@ def grafico_3d(data, max_points):
             y=y,
             z=z,
             surfacecolor=desgaste_grid,
-            customdata=custom_surface,
             cmin=0,
             cmax=100,
             colorscale=[
@@ -326,14 +318,8 @@ def grafico_3d(data, max_points):
                 [1.00, "red"],
             ],
             colorbar=dict(title="Desgaste %"),
-            hovertemplate=(
-                "MD: %{z:.2f} ft<br>"
-                "Desgaste: %{customdata[0]:.1f} %<br>"
-                "Integridad: %{customdata[1]:.1f} %<br>"
-                "Espesor remanente: %{customdata[2]:.3f} in<br>"
-                "IDMX: %{customdata[3]:.3f} in"
-                "<extra></extra>"
-            ),
+            hoverinfo="skip",
+            showscale=True,
             name="Tubular"
         )
     )
@@ -344,19 +330,11 @@ def grafico_3d(data, max_points):
             y=np.zeros(len(depth)),
             z=depth,
             mode="lines+markers",
-            line=dict(width=5, color="black"),
-            marker=dict(size=4, color=desgaste, colorscale="Turbo", cmin=0, cmax=100),
-            customdata=custom_centro,
-            name="Línea de lectura",
-            hovertemplate=(
-                "<b>Lectura del casing</b><br>"
-                "MD: %{z:.2f} ft<br>"
-                "Desgaste: %{customdata[0]:.1f} %<br>"
-                "Integridad: %{customdata[1]:.1f} %<br>"
-                "Espesor remanente: %{customdata[2]:.3f} in<br>"
-                "IDMX: %{customdata[3]:.3f} in"
-                "<extra></extra>"
-            ),
+            line=dict(width=6, color="black"),
+            marker=dict(size=4, color="black"),
+            text=texto_lectura,
+            hovertemplate="%{text}<extra></extra>",
+            name="Línea de lectura"
         )
     )
 
@@ -638,7 +616,7 @@ if fuera_rango > 0:
 
 
 st.subheader("Tubular 3D coloreado por desgaste")
-st.info("Para ver la lectura exacta, pasa el mouse sobre la línea central negra del tubular.")
+st.info("Para ver la lectura exacta, pasa el mouse sobre la línea negra vertical del tubular.")
 st.plotly_chart(grafico_3d(data_filtrada, max_points), use_container_width=True)
 
 
