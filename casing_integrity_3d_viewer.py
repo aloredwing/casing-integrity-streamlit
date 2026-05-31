@@ -21,10 +21,26 @@ NULL_VALUES = [-999.25, -999.2500, -999, -999.0]
 
 RANGOS_PROBLEMA = pd.DataFrame(
     [
-        {"Clase": "Bajo", "Rango": "0 a < 35 %", "Interpretación": "Sin anomalía sostenida relevante"},
-        {"Clase": "Moderado", "Rango": "35 a < 60 %", "Interpretación": "Revisar tendencia o intervalo"},
-        {"Clase": "Crítico", "Rango": "60 a < 80 %", "Interpretación": "Posible problema sostenido"},
-        {"Clase": "Severo", "Rango": "80 a 100 %", "Interpretación": "Alta probabilidad de restricción, deformación o daño sostenido"},
+        {
+            "Clase": "Bajo",
+            "Rango": "0 a < 35 %",
+            "Interpretación": "Sin anomalía sostenida relevante"
+        },
+        {
+            "Clase": "Moderado",
+            "Rango": "35 a < 60 %",
+            "Interpretación": "Revisar tendencia o intervalo"
+        },
+        {
+            "Clase": "Crítico",
+            "Rango": "60 a < 80 %",
+            "Interpretación": "Posible problema sostenido de casing"
+        },
+        {
+            "Clase": "Severo",
+            "Rango": "80 a 100 %",
+            "Interpretación": "Alta probabilidad de restricción, deformación, desgaste severo o daño sostenido"
+        },
     ]
 )
 
@@ -40,6 +56,17 @@ def parse_float(texto, default=None):
         return float(match.group(0))
 
     return default
+
+
+def fmt(valor, decimales=2, unidad=""):
+    try:
+        if pd.isna(valor):
+            return "N/D"
+
+        return f"{float(valor):.{decimales}f}{unidad}"
+
+    except Exception:
+        return "N/D"
 
 
 def limpiar_numero(serie):
@@ -339,16 +366,26 @@ def procesar_datos(
     else:
         data["ovality_las_in"] = np.nan
 
-    id_arm_cols = []
+    radial_cols = []
 
-    for i in range(1, 25):
-        nombre = f"ID{i:02d}"
-        col = buscar_columna(df.columns, [nombre, f"ID{i}"])
+    for i in range(1, 49):
+        col_id = buscar_columna(df.columns, [f"ID{i:02d}", f"ID{i}"])
 
-        if col:
-            nuevo = f"id{i:02d}_in"
-            data[nuevo] = limpiar_numero(df[col])
-            id_arm_cols.append(nuevo)
+        if col_id:
+            nuevo = f"dia_arm_{i:02d}_in"
+            data[nuevo] = limpiar_numero(df[col_id])
+            radial_cols.append(nuevo)
+
+    if len(radial_cols) < 6:
+        radial_cols = []
+
+        for i in range(1, 49):
+            col_r = buscar_columna(df.columns, [f"R{i:02d}", f"R{i}"])
+
+            if col_r:
+                nuevo = f"dia_arm_{i:02d}_in"
+                data[nuevo] = limpiar_numero(df[col_r]) * 2.0
+                radial_cols.append(nuevo)
 
     data = data.dropna(subset=["depth_ft", "id_min_in", "id_avg_in", "id_max_in"])
     data = data.sort_values("depth_ft").reset_index(drop=True)
@@ -436,7 +473,7 @@ def procesar_datos(
     data["probable_cause"] = data.apply(crear_motivo, axis=1)
     data["smoothing_window_points"] = ventana_puntos
 
-    return data, id_arm_cols
+    return data, radial_cols
 
 
 def textos_hover(data):
@@ -445,20 +482,20 @@ def textos_hover(data):
     for _, row in data.iterrows():
         texto = (
             f"<b>Lectura del casing</b><br>"
-            f"MD: {row['depth_ft']:.2f} ft<br>"
+            f"MD: {fmt(row['depth_ft'], 2, ' ft')}<br>"
             f"Tipo de alerta: {row['alert_type']}<br>"
-            f"Problema sostenido: {row['problem_score_pct']:.1f} %<br>"
-            f"Pico puntual: {row['spike_score_pct']:.1f} %<br>"
+            f"Problema sostenido: {fmt(row['problem_score_pct'], 1, ' %')}<br>"
+            f"Pico puntual: {fmt(row['spike_score_pct'], 1, ' %')}<br>"
             f"Clasificación: {row['problem_class']}<br>"
-            f"Desgaste por IDMX: {row['metal_loss_pct']:.1f} %<br>"
-            f"Integridad: {row['integrity_pct']:.1f} %<br>"
-            f"Espesor remanente: {row['remaining_wall_in']:.3f} in<br>"
-            f"IDMN: {row['id_min_in']:.3f} in<br>"
-            f"IDAV: {row['id_avg_in']:.3f} in<br>"
-            f"IDMX: {row['id_max_in']:.3f} in<br>"
-            f"Restricción IDMN: {row['id_restriction_min_in']:.3f} in<br>"
-            f"Ovalidad calculada: {row['ovality_calc_in']:.3f} in<br>"
-            f"Excentricidad: {row['eccentricity_in']:.3f} in<br>"
+            f"Desgaste por IDMX: {fmt(row['metal_loss_pct'], 1, ' %')}<br>"
+            f"Integridad: {fmt(row['integrity_pct'], 1, ' %')}<br>"
+            f"Espesor remanente: {fmt(row['remaining_wall_in'], 3, ' in')}<br>"
+            f"IDMN: {fmt(row['id_min_in'], 3, ' in')}<br>"
+            f"IDAV: {fmt(row['id_avg_in'], 3, ' in')}<br>"
+            f"IDMX: {fmt(row['id_max_in'], 3, ' in')}<br>"
+            f"Restricción IDMN: {fmt(row['id_restriction_min_in'], 3, ' in')}<br>"
+            f"Ovalidad calculada: {fmt(row['ovality_calc_in'], 3, ' in')}<br>"
+            f"Excentricidad: {fmt(row['eccentricity_in'], 3, ' in')}<br>"
             f"Motivo probable: {row['probable_cause']}"
         )
 
@@ -467,22 +504,23 @@ def textos_hover(data):
     return textos
 
 
-def construir_superficie(data, id_arm_cols):
-    if len(id_arm_cols) >= 6:
-        ids = data[id_arm_cols].copy()
+def construir_superficie(data, radial_cols):
+    if len(radial_cols) >= 6:
+        diametros = data[radial_cols].copy()
 
-        for col in id_arm_cols:
-            ids[col] = ids[col].fillna(data["id_avg_in"])
+        for col in radial_cols:
+            diametros[col] = diametros[col].fillna(data["id_avg_in"])
 
-        radios = ids.to_numpy(dtype=float) / 2
+        radios = diametros.to_numpy(dtype=float) / 2
         radios = np.clip(radios, 0, data["case_od_in"].to_numpy().reshape(-1, 1) / 2)
 
-        theta = np.linspace(0, 2 * np.pi, len(id_arm_cols), endpoint=False)
+        theta = np.linspace(0, 2 * np.pi, len(radial_cols), endpoint=False)
 
         radios = np.column_stack([radios, radios[:, 0]])
         theta = np.append(theta, 2 * np.pi)
+
     else:
-        theta = np.linspace(0, 2 * np.pi, 72)
+        theta = np.linspace(0, 2 * np.pi, 96)
 
         rx = data["id_max_in"].fillna(data["id_avg_in"]).to_numpy() / 2
         ry = data["id_min_in"].fillna(data["id_avg_in"]).to_numpy() / 2
@@ -514,14 +552,14 @@ def construir_superficie(data, id_arm_cols):
     return x, y, z
 
 
-def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
+def grafico_3d(data, radial_cols, max_points, umbral_problema):
     if len(data) > max_points:
         indices = np.linspace(0, len(data) - 1, max_points).astype(int)
         data_plot = data.iloc[indices].copy()
     else:
         data_plot = data.copy()
 
-    x, y, z = construir_superficie(data_plot, id_arm_cols)
+    x, y, z = construir_superficie(data_plot, radial_cols)
 
     score = data_plot["problem_score_pct"].fillna(0).to_numpy()
     score_grid = np.repeat(score.reshape(-1, 1), x.shape[1], axis=1)
@@ -558,18 +596,41 @@ def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
         )
     )
 
+    cantidad_angulos = x.shape[1]
+    angulos_lectura = np.linspace(0, cantidad_angulos - 1, min(16, cantidad_angulos)).astype(int)
+
+    x_hover = x[:, angulos_lectura].reshape(-1)
+    y_hover = y[:, angulos_lectura].reshape(-1)
+    z_hover = z[:, angulos_lectura].reshape(-1)
+
+    textos_hover_superficie = np.repeat(np.array(textos, dtype=object), len(angulos_lectura))
+    score_hover = np.repeat(score, len(angulos_lectura))
+
     fig.add_trace(
         go.Scatter3d(
-            x=np.zeros(len(data_plot)),
-            y=np.zeros(len(data_plot)),
-            z=data_plot["depth_ft"],
-            mode="lines+markers",
-            line=dict(width=7, color="black"),
-            marker=dict(size=4, color="black"),
-            text=textos,
+            x=x_hover,
+            y=y_hover,
+            z=z_hover,
+            mode="markers",
+            marker=dict(
+                size=4,
+                color=score_hover,
+                colorscale=[
+                    [0.00, "green"],
+                    [0.35, "lightgreen"],
+                    [0.60, "yellow"],
+                    [0.80, "orange"],
+                    [1.00, "red"],
+                ],
+                cmin=0,
+                cmax=100,
+                opacity=0.35
+            ),
+            text=textos_hover_superficie,
             hovertemplate="%{text}<extra></extra>",
             hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
-            name="Línea de lectura"
+            name="Lectura sobre casing",
+            showlegend=True
         )
     )
 
@@ -580,7 +641,8 @@ def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
             crit = crit.sort_values("problem_score_pct", ascending=False).head(120)
             crit = crit.sort_values("depth_ft")
 
-        r_lateral = np.nanmax(np.sqrt(x ** 2 + y ** 2)) + 0.35
+        radio_maximo = np.nanmax(np.sqrt(x ** 2 + y ** 2))
+        r_lateral = radio_maximo + 0.35
 
         fig.add_trace(
             go.Scatter3d(
@@ -589,7 +651,7 @@ def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
                 z=crit["depth_ft"],
                 mode="markers",
                 marker=dict(
-                    size=5,
+                    size=6,
                     color=crit["problem_score_pct"],
                     colorscale="Turbo",
                     cmin=0,
@@ -605,8 +667,8 @@ def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
 
     fig.add_annotation(
         text=(
-            "<b>Rangos:</b> Bajo &lt;35% | Moderado 35-59% | "
-            "Crítico 60-79% | Severo ≥80%"
+            "<b>Rangos:</b> Bajo &lt;35% | Moderado 35 a 59% | "
+            "Crítico 60 a 79% | Severo ≥80%"
         ),
         xref="paper",
         yref="paper",
@@ -614,7 +676,7 @@ def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
         y=1.05,
         showarrow=False,
         align="left",
-        bgcolor="rgba(255,255,255,0.85)",
+        bgcolor="rgba(255,255,255,0.90)",
         bordercolor="gray",
         borderwidth=1
     )
@@ -920,7 +982,7 @@ with m4:
 
 
 try:
-    data, id_arm_cols = procesar_datos(
+    data, radial_cols = procesar_datos(
         df,
         col_depth,
         col_idmn,
@@ -984,12 +1046,12 @@ if fuera_rango > 0:
 
 st.subheader("Tubular 3D coloreado por problema sostenido del casing")
 st.info(
-    "Pasa el cursor sobre el casing o sobre la línea negra central para ver MD, tipo de alerta, problema sostenido, "
+    "Pasa el cursor directamente sobre el casing 3D para ver MD, tipo de alerta, problema sostenido, "
     "pico puntual, desgaste, integridad, IDMN, IDAV, IDMX, espesor remanente y motivo probable."
 )
 
 st.plotly_chart(
-    grafico_3d(data_filtrada, id_arm_cols, max_points, umbral_problema),
+    grafico_3d(data_filtrada, radial_cols, max_points, umbral_problema),
     use_container_width=True
 )
 
