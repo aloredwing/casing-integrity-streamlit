@@ -12,11 +12,21 @@ st.set_page_config(page_title="Casing Integrity 3D Viewer", layout="wide")
 st.title("Casing Integrity 3D Viewer")
 st.caption(
     "Sube un archivo LAS, Excel o CSV del registro caliper. "
-    "La app detecta desgaste, restricción, ovalidad, excentricidad y posibles zonas problemáticas del casing."
+    "La app diferencia picos puntuales de problemas sostenidos del casing."
 )
 
 
 NULL_VALUES = [-999.25, -999.2500, -999, -999.0]
+
+
+RANGOS_PROBLEMA = pd.DataFrame(
+    [
+        {"Clase": "Bajo", "Rango": "0 a < 35 %", "Interpretación": "Sin anomalía sostenida relevante"},
+        {"Clase": "Moderado", "Rango": "35 a < 60 %", "Interpretación": "Revisar tendencia o intervalo"},
+        {"Clase": "Crítico", "Rango": "60 a < 80 %", "Interpretación": "Posible problema sostenido"},
+        {"Clase": "Severo", "Rango": "80 a 100 %", "Interpretación": "Alta probabilidad de restricción, deformación o daño sostenido"},
+    ]
+)
 
 
 def parse_float(texto, default=None):
@@ -49,17 +59,6 @@ def buscar_columna(columnas, opciones):
     return None
 
 
-def clasificar_integridad(integridad):
-    if integridad >= 80:
-        return "Aceptable"
-    if integridad >= 60:
-        return "Moderado"
-    if integridad >= 40:
-        return "Crítico"
-
-    return "Severo"
-
-
 def clasificar_problema(score):
     if score >= 80:
         return "Severo"
@@ -69,6 +68,17 @@ def clasificar_problema(score):
         return "Moderado"
 
     return "Bajo"
+
+
+def clasificar_integridad(integridad):
+    if integridad >= 80:
+        return "Aceptable"
+    if integridad >= 60:
+        return "Moderado"
+    if integridad >= 40:
+        return "Crítico"
+
+    return "Severo"
 
 
 def leer_las_desde_texto(texto):
@@ -101,15 +111,18 @@ def leer_las_desde_texto(texto):
     for i, linea in enumerate(lineas):
         if linea.strip().upper().startswith("~A"):
             indice_a = i
+            partes_a = linea.split()
+
+            if len(partes_a) > 1:
+                curvas_a = partes_a[1:]
+
+                if len(curvas_a) >= len(curvas):
+                    curvas = curvas_a
+
             break
 
     if indice_a is None:
         raise ValueError("No se encontró la sección ~A del archivo LAS.")
-
-    if not curvas:
-        partes_a = lineas[indice_a].split()
-        if len(partes_a) > 1:
-            curvas = partes_a[1:]
 
     if not curvas:
         raise ValueError("No se encontraron curvas en el archivo LAS.")
@@ -218,39 +231,73 @@ def leer_archivo(archivo):
     raise ValueError("Formato no soportado. Usa LAS, Excel o CSV.")
 
 
-def score_por_salto(serie, referencia):
-    s = pd.Series(serie).astype(float)
-    salto = s.diff().abs()
-    salto = salto.fillna(0)
+def ventana_puntos_por_ft(depth, ventana_ft):
+    d = pd.Series(depth).dropna().sort_values().to_numpy()
 
-    if referencia <= 0:
-        referencia = 0.10
+    if len(d) < 3:
+        return 5
 
-    return np.clip((salto / referencia) * 100, 0, 100)
+    paso = np.nanmedian(np.diff(d))
+
+    if not np.isfinite(paso) or paso <= 0:
+        paso = 0.125
+
+    puntos = int(round(float(ventana_ft) / paso))
+    puntos = max(5, puntos)
+
+    if puntos % 2 == 0:
+        puntos += 1
+
+    return puntos
+
+
+def suavizar_sostenido(serie, ventana_puntos):
+    return (
+        pd.Series(serie)
+        .rolling(window=ventana_puntos, center=True, min_periods=max(3, ventana_puntos // 3))
+        .median()
+        .bfill()
+        .ffill()
+        .to_numpy()
+    )
 
 
 def crear_motivo(row):
     motivos = []
 
-    if row["wear_score_pct"] >= 35:
-        motivos.append("aumento de IDMX o desgaste")
+    if row["wear_score_sustained_pct"] >= 35:
+        motivos.append("aumento sostenido de IDMX o desgaste")
 
-    if row["restriction_score_pct"] >= 35:
-        motivos.append("reducción de IDMN o posible restricción")
+    if row["restriction_score_sustained_pct"] >= 35:
+        motivos.append("reducción sostenida de IDMN o posible restricción")
 
-    if row["ovality_score_pct"] >= 35:
-        motivos.append("alta ovalidad")
+    if row["ovality_score_sustained_pct"] >= 35:
+        motivos.append("ovalidad sostenida")
 
-    if row["eccentricity_score_pct"] >= 35:
-        motivos.append("alta excentricidad")
+    if row["eccentricity_score_sustained_pct"] >= 35:
+        motivos.append("excentricidad sostenida")
 
-    if row["jump_score_pct"] >= 35:
-        motivos.append("cambio brusco de lectura")
+    if row["jump_score_sustained_pct"] >= 35:
+        motivos.append("cambio brusco sostenido")
+
+    if row["spike_score_pct"] >= 60 and row["problem_score_pct"] < 35:
+        motivos.append("pico puntual de lectura, revisar como posible ruido, collar, suciedad o centralización")
 
     if not motivos:
-        return "sin anomalía relevante"
+        return "sin anomalía sostenida relevante"
 
     return ", ".join(motivos)
+
+
+def tipo_alerta(row):
+    if row["problem_score_pct"] >= 60:
+        return "Problema sostenido"
+    if row["problem_score_pct"] >= 35:
+        return "Tendencia moderada"
+    if row["spike_score_pct"] >= 60:
+        return "Pico puntual"
+
+    return "Normal"
 
 
 def procesar_datos(
@@ -265,7 +312,8 @@ def procesar_datos(
     restriction_ref,
     ovality_ref,
     eccentricity_ref,
-    jump_ref
+    jump_ref,
+    ventana_sostenida_ft
 ):
     data = pd.DataFrame()
 
@@ -320,49 +368,73 @@ def procesar_datos(
     data["diameter_spread_in"] = data["id_max_in"] - data["id_min_in"]
     data["ovality_calc_in"] = data["diameter_spread_in"].clip(lower=0)
 
-    data["wear_score_pct"] = np.clip(
-        (data["id_enlargement_max_in"].clip(lower=0) / (2 * wall_thickness)) * 100,
+    data["wear_score_raw_pct"] = np.clip(
+        (data["id_enlargement_max_in"].clip(lower=0) / max(2 * wall_thickness, 0.001)) * 100,
         0,
         100
     )
 
-    data["restriction_score_pct"] = np.clip(
-        (data["id_restriction_min_in"].clip(lower=0) / restriction_ref) * 100,
+    data["restriction_score_raw_pct"] = np.clip(
+        (data["id_restriction_min_in"].clip(lower=0) / max(restriction_ref, 0.001)) * 100,
         0,
         100
     )
 
-    data["ovality_score_pct"] = np.clip(
-        (data["ovality_calc_in"].clip(lower=0) / ovality_ref) * 100,
+    data["ovality_score_raw_pct"] = np.clip(
+        (data["ovality_calc_in"].clip(lower=0) / max(ovality_ref, 0.001)) * 100,
         0,
         100
     )
 
-    data["eccentricity_score_pct"] = np.clip(
-        (data["eccentricity_in"].fillna(0).clip(lower=0) / eccentricity_ref) * 100,
+    data["eccentricity_score_raw_pct"] = np.clip(
+        (data["eccentricity_in"].fillna(0).clip(lower=0) / max(eccentricity_ref, 0.001)) * 100,
         0,
         100
     )
 
-    jump_idmn = score_por_salto(data["id_min_in"], jump_ref)
-    jump_idmx = score_por_salto(data["id_max_in"], jump_ref)
+    salto_idmn = data["id_min_in"].diff().abs().fillna(0)
+    salto_idmx = data["id_max_in"].diff().abs().fillna(0)
 
-    data["jump_score_pct"] = np.maximum(jump_idmn, jump_idmx)
+    data["jump_score_raw_pct"] = np.clip(
+        (np.maximum(salto_idmn, salto_idmx) / max(jump_ref, 0.001)) * 100,
+        0,
+        100
+    )
+
+    ventana_puntos = ventana_puntos_por_ft(data["depth_ft"], ventana_sostenida_ft)
+
+    for base in ["wear", "restriction", "ovality", "eccentricity", "jump"]:
+        data[f"{base}_score_sustained_pct"] = suavizar_sostenido(
+            data[f"{base}_score_raw_pct"],
+            ventana_puntos
+        )
+
+    data["spike_score_pct"] = data[
+        [
+            "wear_score_raw_pct",
+            "restriction_score_raw_pct",
+            "ovality_score_raw_pct",
+            "eccentricity_score_raw_pct",
+            "jump_score_raw_pct"
+        ]
+    ].max(axis=1)
 
     data["problem_score_pct"] = data[
         [
-            "wear_score_pct",
-            "restriction_score_pct",
-            "ovality_score_pct",
-            "eccentricity_score_pct",
-            "jump_score_pct"
+            "wear_score_sustained_pct",
+            "restriction_score_sustained_pct",
+            "ovality_score_sustained_pct",
+            "eccentricity_score_sustained_pct",
+            "jump_score_sustained_pct"
         ]
     ].max(axis=1)
 
     data["out_of_physical_range"] = data["id_max_in"] > data["case_od_in"]
     data["integrity_class"] = data["integrity_pct"].apply(clasificar_integridad)
     data["problem_class"] = data["problem_score_pct"].apply(clasificar_problema)
+    data["alert_type"] = data.apply(tipo_alerta, axis=1)
     data["probable_cause"] = data.apply(crear_motivo, axis=1)
+    data["smoothing_window_points"] = ventana_puntos
 
     return data, id_arm_cols
 
@@ -374,8 +446,10 @@ def textos_hover(data):
         texto = (
             f"<b>Lectura del casing</b><br>"
             f"MD: {row['depth_ft']:.2f} ft<br>"
-            f"Problema casing: {row['problem_score_pct']:.1f} %<br>"
-            f"Clasificación problema: {row['problem_class']}<br>"
+            f"Tipo de alerta: {row['alert_type']}<br>"
+            f"Problema sostenido: {row['problem_score_pct']:.1f} %<br>"
+            f"Pico puntual: {row['spike_score_pct']:.1f} %<br>"
+            f"Clasificación: {row['problem_class']}<br>"
             f"Desgaste por IDMX: {row['metal_loss_pct']:.1f} %<br>"
             f"Integridad: {row['integrity_pct']:.1f} %<br>"
             f"Espesor remanente: {row['remaining_wall_in']:.3f} in<br>"
@@ -419,10 +493,13 @@ def construir_superficie(data, id_arm_cols):
         radios = []
 
         for i in range(len(data)):
-            r = (rx[i] * ry[i]) / np.sqrt(
+            denominador = np.sqrt(
                 (ry[i] * np.cos(theta)) ** 2 +
                 (rx[i] * np.sin(theta)) ** 2
             )
+
+            denominador = np.where(denominador == 0, 1e-9, denominador)
+            r = (rx[i] * ry[i]) / denominador
             radios.append(r)
 
         radios = np.array(radios)
@@ -434,7 +511,7 @@ def construir_superficie(data, id_arm_cols):
     y = radios * np.sin(theta_grid)
     z = depth_grid
 
-    return x, y, z, theta
+    return x, y, z
 
 
 def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
@@ -444,7 +521,7 @@ def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
     else:
         data_plot = data.copy()
 
-    x, y, z, theta = construir_superficie(data_plot, id_arm_cols)
+    x, y, z = construir_superficie(data_plot, id_arm_cols)
 
     score = data_plot["problem_score_pct"].fillna(0).to_numpy()
     score_grid = np.repeat(score.reshape(-1, 1), x.shape[1], axis=1)
@@ -470,7 +547,11 @@ def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
                 [0.80, "orange"],
                 [1.00, "red"],
             ],
-            colorbar=dict(title="Problema casing %"),
+            colorbar=dict(
+                title="Problema sostenido %",
+                tickvals=[17.5, 47.5, 70, 90],
+                ticktext=["Bajo", "Moderado", "Crítico", "Severo"]
+            ),
             hovertemplate="%{text}<extra></extra>",
             hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
             name="Casing"
@@ -518,9 +599,25 @@ def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
                 text=textos_hover(crit),
                 hovertemplate="%{text}<extra></extra>",
                 hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
-                name="Alertas"
+                name="Alertas sostenidas"
             )
         )
+
+    fig.add_annotation(
+        text=(
+            "<b>Rangos:</b> Bajo &lt;35% | Moderado 35-59% | "
+            "Crítico 60-79% | Severo ≥80%"
+        ),
+        xref="paper",
+        yref="paper",
+        x=0.01,
+        y=1.05,
+        showarrow=False,
+        align="left",
+        bgcolor="rgba(255,255,255,0.85)",
+        bordercolor="gray",
+        borderwidth=1
+    )
 
     fig.update_layout(
         height=760,
@@ -532,7 +629,7 @@ def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
             aspectmode="manual",
             aspectratio=dict(x=1, y=1, z=4),
         ),
-        margin=dict(l=0, r=0, t=20, b=0),
+        margin=dict(l=0, r=0, t=60, b=0),
         legend=dict(orientation="h")
     )
 
@@ -542,59 +639,25 @@ def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
 def grafico_tracks(data, umbral_problema):
     fig = go.Figure()
 
-    fig.add_trace(
-        go.Scatter(
-            x=data["problem_score_pct"],
-            y=data["depth_ft"],
-            mode="lines",
-            name="Problema casing, %"
-        )
-    )
+    curvas = [
+        ("problem_score_pct", "Problema sostenido, %"),
+        ("spike_score_pct", "Pico puntual, %"),
+        ("metal_loss_pct", "Desgaste por IDMX, %"),
+        ("restriction_score_sustained_pct", "Restricción IDMN sostenida, %"),
+        ("ovality_score_sustained_pct", "Ovalidad sostenida, %"),
+        ("eccentricity_score_sustained_pct", "Excentricidad sostenida, %"),
+        ("integrity_pct", "Integridad, %"),
+    ]
 
-    fig.add_trace(
-        go.Scatter(
-            x=data["metal_loss_pct"],
-            y=data["depth_ft"],
-            mode="lines",
-            name="Desgaste por IDMX, %"
+    for col, nombre in curvas:
+        fig.add_trace(
+            go.Scatter(
+                x=data[col],
+                y=data["depth_ft"],
+                mode="lines",
+                name=nombre
+            )
         )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=data["restriction_score_pct"],
-            y=data["depth_ft"],
-            mode="lines",
-            name="Restricción IDMN, %"
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=data["ovality_score_pct"],
-            y=data["depth_ft"],
-            mode="lines",
-            name="Ovalidad, %"
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=data["eccentricity_score_pct"],
-            y=data["depth_ft"],
-            mode="lines",
-            name="Excentricidad, %"
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=data["integrity_pct"],
-            y=data["depth_ft"],
-            mode="lines",
-            name="Integridad, %"
-        )
-    )
 
     fig.add_vline(
         x=umbral_problema,
@@ -603,7 +666,7 @@ def grafico_tracks(data, umbral_problema):
     )
 
     fig.update_layout(
-        height=560,
+        height=580,
         yaxis=dict(title="MD, ft", autorange="reversed"),
         xaxis=dict(title="Score / porcentaje, %", range=[0, 100]),
         legend=dict(orientation="h"),
@@ -616,32 +679,19 @@ def grafico_tracks(data, umbral_problema):
 def grafico_id(data):
     fig = go.Figure()
 
-    fig.add_trace(
-        go.Scatter(
-            x=data["id_min_in"],
-            y=data["depth_ft"],
-            mode="lines",
-            name="IDMN"
+    for col, nombre in [
+        ("id_min_in", "IDMN"),
+        ("id_avg_in", "IDAV"),
+        ("id_max_in", "IDMX"),
+    ]:
+        fig.add_trace(
+            go.Scatter(
+                x=data[col],
+                y=data["depth_ft"],
+                mode="lines",
+                name=nombre
+            )
         )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=data["id_avg_in"],
-            y=data["depth_ft"],
-            mode="lines",
-            name="IDAV"
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=data["id_max_in"],
-            y=data["depth_ft"],
-            mode="lines",
-            name="IDMX"
-        )
-    )
 
     nominal = float(data["nominal_id_in"].iloc[0])
     od = float(data["case_od_in"].iloc[0])
@@ -660,6 +710,27 @@ def grafico_id(data):
     return fig
 
 
+def crear_intervalo(b):
+    fila_max = b.sort_values("problem_score_pct", ascending=False).iloc[0]
+
+    return {
+        "from_ft": b["depth_ft"].min(),
+        "to_ft": b["depth_ft"].max(),
+        "longitud_ft": b["depth_ft"].max() - b["depth_ft"].min(),
+        "max_problem_score_pct": b["problem_score_pct"].max(),
+        "max_spike_score_pct": b["spike_score_pct"].max(),
+        "max_metal_loss_pct": b["metal_loss_pct"].max(),
+        "max_restriction_score_pct": b["restriction_score_sustained_pct"].max(),
+        "max_ovality_score_pct": b["ovality_score_sustained_pct"].max(),
+        "max_eccentricity_score_pct": b["eccentricity_score_sustained_pct"].max(),
+        "min_integrity_pct": b["integrity_pct"].min(),
+        "min_idmn_in": b["id_min_in"].min(),
+        "max_idmx_in": b["id_max_in"].max(),
+        "probable_cause": fila_max["probable_cause"],
+        "class": clasificar_problema(b["problem_score_pct"].max())
+    }
+
+
 def intervalos_criticos(data, umbral):
     data = data.sort_values("depth_ft").copy()
     data["critico"] = data["problem_score_pct"] >= umbral
@@ -673,41 +744,12 @@ def intervalos_criticos(data, umbral):
         else:
             if bloque:
                 b = pd.DataFrame(bloque)
-
-                intervalos.append({
-                    "from_ft": b["depth_ft"].min(),
-                    "to_ft": b["depth_ft"].max(),
-                    "max_problem_score_pct": b["problem_score_pct"].max(),
-                    "max_metal_loss_pct": b["metal_loss_pct"].max(),
-                    "max_restriction_score_pct": b["restriction_score_pct"].max(),
-                    "max_ovality_score_pct": b["ovality_score_pct"].max(),
-                    "max_eccentricity_score_pct": b["eccentricity_score_pct"].max(),
-                    "min_integrity_pct": b["integrity_pct"].min(),
-                    "min_idmn_in": b["id_min_in"].min(),
-                    "max_idmx_in": b["id_max_in"].max(),
-                    "probable_cause": b.sort_values("problem_score_pct", ascending=False)["probable_cause"].iloc[0],
-                    "class": clasificar_problema(b["problem_score_pct"].max())
-                })
-
+                intervalos.append(crear_intervalo(b))
                 bloque = []
 
     if bloque:
         b = pd.DataFrame(bloque)
-
-        intervalos.append({
-            "from_ft": b["depth_ft"].min(),
-            "to_ft": b["depth_ft"].max(),
-            "max_problem_score_pct": b["problem_score_pct"].max(),
-            "max_metal_loss_pct": b["metal_loss_pct"].max(),
-            "max_restriction_score_pct": b["restriction_score_pct"].max(),
-            "max_ovality_score_pct": b["ovality_score_pct"].max(),
-            "max_eccentricity_score_pct": b["eccentricity_score_pct"].max(),
-            "min_integrity_pct": b["integrity_pct"].min(),
-            "min_idmn_in": b["id_min_in"].min(),
-            "max_idmx_in": b["id_max_in"].max(),
-            "probable_cause": b.sort_values("problem_score_pct", ascending=False)["probable_cause"].iloc[0],
-            "class": clasificar_problema(b["problem_score_pct"].max())
-        })
+        intervalos.append(crear_intervalo(b))
 
     return pd.DataFrame(intervalos)
 
@@ -751,7 +793,7 @@ wall_thickness = st.sidebar.number_input(
 
 nominal_id = st.sidebar.number_input(
     "ID nominal, in",
-    value=float(case_od - 2 * wall_thickness),
+    value=float(meta.get("case_id", case_od - 2 * wall_thickness)),
     step=0.001,
     format="%.3f"
 )
@@ -759,10 +801,19 @@ nominal_id = st.sidebar.number_input(
 st.sidebar.header("Criterios de alerta")
 
 umbral_problema = st.sidebar.slider(
-    "Umbral de problema casing, %",
+    "Umbral de problema sostenido, %",
     10,
     100,
     60
+)
+
+ventana_sostenida_ft = st.sidebar.number_input(
+    "Ventana sostenida, ft",
+    value=5.0,
+    min_value=0.5,
+    max_value=50.0,
+    step=0.5,
+    format="%.1f"
 )
 
 restriction_ref = st.sidebar.number_input(
@@ -813,6 +864,15 @@ c4.metric("Fuente", meta["fuente"])
 
 st.write(f"Pozo: **{meta.get('pozo', '')}**")
 st.write(f"Campo: **{meta.get('campo', '')}**")
+
+
+st.subheader("Rangos de clasificación del problema sostenido")
+st.dataframe(RANGOS_PROBLEMA, use_container_width=True, hide_index=True)
+
+st.caption(
+    "Nota técnica: el score de problema sostenido no es un porcentaje directo de rotura. "
+    "Es un índice de alerta calculado con una ventana móvil para reducir falsos positivos por picos puntuales."
+)
 
 
 st.subheader("Vista previa de datos leídos")
@@ -872,7 +932,8 @@ try:
         restriction_ref,
         ovality_ref,
         eccentricity_ref,
-        jump_ref
+        jump_ref,
+        ventana_sostenida_ft
     )
 except Exception as e:
     st.error(f"No pude procesar los datos: {e}")
@@ -906,8 +967,8 @@ k1, k2, k3, k4, k5, k6 = st.columns(6)
 
 k1.metric("MD inicial", f"{data_filtrada['depth_ft'].min():.2f} ft")
 k2.metric("MD final", f"{data_filtrada['depth_ft'].max():.2f} ft")
-k3.metric("Máx. problema", f"{data_filtrada['problem_score_pct'].max():.1f} %")
-k4.metric("Mayor desgaste", f"{data_filtrada['metal_loss_pct'].max():.1f} %")
+k3.metric("Máx. problema sostenido", f"{data_filtrada['problem_score_pct'].max():.1f} %")
+k4.metric("Máx. pico puntual", f"{data_filtrada['spike_score_pct'].max():.1f} %")
 k5.metric("Menor IDMN", f"{data_filtrada['id_min_in'].min():.3f} in")
 k6.metric("Integridad mínima", f"{data_filtrada['integrity_pct'].min():.1f} %")
 
@@ -921,10 +982,10 @@ if fuera_rango > 0:
     )
 
 
-st.subheader("Tubular 3D coloreado por problema del casing")
+st.subheader("Tubular 3D coloreado por problema sostenido del casing")
 st.info(
-    "Pasa el cursor sobre el casing o sobre la línea negra central para ver MD, problema, desgaste, "
-    "integridad, IDMN, IDAV, IDMX, espesor remanente y motivo probable."
+    "Pasa el cursor sobre el casing o sobre la línea negra central para ver MD, tipo de alerta, problema sostenido, "
+    "pico puntual, desgaste, integridad, IDMN, IDAV, IDMX, espesor remanente y motivo probable."
 )
 
 st.plotly_chart(
@@ -933,7 +994,7 @@ st.plotly_chart(
 )
 
 
-st.subheader("Tracks de problema, desgaste, restricción, ovalidad e integridad")
+st.subheader("Tracks de problema sostenido, picos puntuales y variables de casing")
 st.plotly_chart(grafico_tracks(data_filtrada, umbral_problema), use_container_width=True)
 
 
@@ -941,22 +1002,24 @@ st.subheader("Tracks IDMN, IDAV e IDMX")
 st.plotly_chart(grafico_id(data_filtrada), use_container_width=True)
 
 
-st.subheader("Profundidades con mayor problema de casing")
+st.subheader("Profundidades con mayor problema sostenido")
 
 top = data_filtrada.sort_values(
     [
         "problem_score_pct",
-        "restriction_score_pct",
-        "ovality_score_pct",
+        "restriction_score_sustained_pct",
+        "ovality_score_sustained_pct",
         "metal_loss_pct",
-        "eccentricity_score_pct"
+        "eccentricity_score_sustained_pct"
     ],
     ascending=[False, False, False, False, False]
 ).head(30)
 
 columnas_top = [
     "depth_ft",
+    "alert_type",
     "problem_score_pct",
+    "spike_score_pct",
     "problem_class",
     "probable_cause",
     "id_min_in",
@@ -965,41 +1028,57 @@ columnas_top = [
     "remaining_wall_in",
     "integrity_pct",
     "metal_loss_pct",
-    "restriction_score_pct",
+    "restriction_score_sustained_pct",
     "id_restriction_min_in",
     "ovality_calc_in",
-    "ovality_score_pct",
+    "ovality_score_sustained_pct",
     "eccentricity_in",
-    "eccentricity_score_pct",
-    "jump_score_pct",
+    "eccentricity_score_sustained_pct",
+    "jump_score_sustained_pct",
     "out_of_physical_range"
 ]
 
 st.dataframe(top[columnas_top].round(4), use_container_width=True)
 
 
-st.subheader("Revisión rápida de zona 300 ft a 450 ft")
+st.subheader("Revisión rápida de zona 350 ft a 450 ft")
 
-zona_300_450 = data[
-    (data["depth_ft"] >= 300) &
+zona_350_450 = data[
+    (data["depth_ft"] >= 350) &
     (data["depth_ft"] <= 450)
 ].copy()
 
-if zona_300_450.empty:
-    st.info("El archivo no contiene datos entre 300 ft y 450 ft.")
+if zona_350_450.empty:
+    st.info("El archivo no contiene datos entre 350 ft y 450 ft.")
 else:
     st.dataframe(
-        zona_300_450.sort_values("problem_score_pct", ascending=False)[columnas_top].head(30).round(4),
+        zona_350_450.sort_values("problem_score_pct", ascending=False)[columnas_top].head(40).round(4),
         use_container_width=True
     )
 
 
-st.subheader("Intervalos críticos")
+st.subheader("Picos puntuales que NO necesariamente son daño sostenido")
+
+picos = data_filtrada[
+    (data_filtrada["spike_score_pct"] >= 60) &
+    (data_filtrada["problem_score_pct"] < 35)
+].copy()
+
+if picos.empty:
+    st.success("No se detectaron picos puntuales aislados relevantes dentro del rango filtrado.")
+else:
+    st.dataframe(
+        picos.sort_values("spike_score_pct", ascending=False)[columnas_top].head(30).round(4),
+        use_container_width=True
+    )
+
+
+st.subheader("Intervalos críticos sostenidos")
 
 intervalos = intervalos_criticos(data_filtrada, umbral_problema)
 
 if intervalos.empty:
-    st.success("No se detectaron intervalos por encima del umbral seleccionado.")
+    st.success("No se detectaron intervalos sostenidos por encima del umbral seleccionado.")
 else:
     st.dataframe(intervalos.round(4), use_container_width=True)
 
@@ -1008,6 +1087,11 @@ st.subheader("Tabla procesada completa")
 
 columnas_salida = [
     "depth_ft",
+    "alert_type",
+    "problem_score_pct",
+    "spike_score_pct",
+    "problem_class",
+    "probable_cause",
     "id_min_in",
     "id_avg_in",
     "id_max_in",
@@ -1025,16 +1109,19 @@ columnas_salida = [
     "ovality_calc_in",
     "ovality_las_in",
     "eccentricity_in",
-    "wear_score_pct",
-    "restriction_score_pct",
-    "ovality_score_pct",
-    "eccentricity_score_pct",
-    "jump_score_pct",
-    "problem_score_pct",
-    "problem_class",
-    "probable_cause",
+    "wear_score_raw_pct",
+    "wear_score_sustained_pct",
+    "restriction_score_raw_pct",
+    "restriction_score_sustained_pct",
+    "ovality_score_raw_pct",
+    "ovality_score_sustained_pct",
+    "eccentricity_score_raw_pct",
+    "eccentricity_score_sustained_pct",
+    "jump_score_raw_pct",
+    "jump_score_sustained_pct",
     "out_of_physical_range",
-    "integrity_class"
+    "integrity_class",
+    "smoothing_window_points"
 ]
 
 st.dataframe(data_filtrada[columnas_salida].round(4), use_container_width=True)
@@ -1045,6 +1132,6 @@ csv = data_filtrada[columnas_salida].to_csv(index=False).encode("utf-8")
 st.download_button(
     "Descargar tabla procesada CSV",
     data=csv,
-    file_name="casing_integrity_problem_analysis.csv",
+    file_name="casing_integrity_sustained_problem_analysis.csv",
     mime="text/csv"
 )
