@@ -12,7 +12,7 @@ st.set_page_config(page_title="Casing Integrity 3D Viewer", layout="wide")
 st.title("Casing Integrity 3D Viewer")
 st.caption(
     "Sube un archivo LAS, Excel o CSV. "
-    "La app clasifica el casing por desviación del ID nominal: colapso, buen estado o desgaste."
+    "La app clasifica el casing por desviación del ID nominal y muestra R01 a R24 por profundidad."
 )
 
 
@@ -71,15 +71,15 @@ RANGOS_ESTADO = pd.DataFrame(
 
 
 COLOR_SCALE_ESTADO = [
-    [0.00, "#2b004f"],
-    [0.30, "#0033cc"],
-    [0.40, "#00a6ff"],
-    [0.45, "#4ddbc8"],
-    [0.50, "#00a651"],
-    [0.55, "#ffff00"],
-    [0.60, "#ff9900"],
-    [0.70, "#ff0000"],
-    [1.00, "#7a0000"],
+    [0.00, "#2b004f"],   # -100 Colapso crítico
+    [0.30, "#0033cc"],   # -40 Colapso severo
+    [0.40, "#00a6ff"],   # -20 Colapso moderado
+    [0.45, "#4ddbc8"],   # -10 Colapso leve
+    [0.50, "#00a651"],   # 0 Buen estado
+    [0.55, "#ffff00"],   # +10 Desgaste leve
+    [0.60, "#ff9900"],   # +20 Desgaste moderado
+    [0.70, "#ff0000"],   # +40 Desgaste severo
+    [1.00, "#7a0000"],   # +100 Desgaste crítico
 ]
 
 
@@ -326,6 +326,30 @@ def leer_archivo(archivo):
     raise ValueError("Formato no soportado. Usa LAS, Excel o CSV.")
 
 
+def detectar_columnas_r(df):
+    r_cols = []
+
+    for i in range(1, 25):
+        col = buscar_columna(df.columns, [f"R{i:02d}", f"R{i}"])
+
+        if col:
+            r_cols.append((f"R{i:02d}", col))
+
+    return r_cols
+
+
+def detectar_columnas_id_arm(df):
+    id_cols = []
+
+    for i in range(1, 25):
+        col = buscar_columna(df.columns, [f"ID{i:02d}", f"ID{i}"])
+
+        if col:
+            id_cols.append((f"ID{i:02d}", col))
+
+    return id_cols
+
+
 def procesar_datos(
     df,
     col_depth,
@@ -361,26 +385,21 @@ def procesar_datos(
     else:
         data["ovality_las_in"] = np.nan
 
-    radial_cols = []
+    r_original_cols = []
+    r_las_cols = detectar_columnas_r(df)
 
-    for i in range(1, 49):
-        col_id = buscar_columna(df.columns, [f"ID{i:02d}", f"ID{i}"])
+    for etiqueta, col in r_las_cols:
+        nuevo = f"{etiqueta}_in"
+        data[nuevo] = limpiar_numero(df[col])
+        r_original_cols.append(nuevo)
 
-        if col_id:
-            nuevo = f"dia_arm_{i:02d}_in"
-            data[nuevo] = limpiar_numero(df[col_id])
-            radial_cols.append(nuevo)
+    id_arm_cols = []
+    id_las_cols = detectar_columnas_id_arm(df)
 
-    if len(radial_cols) < 6:
-        radial_cols = []
-
-        for i in range(1, 49):
-            col_r = buscar_columna(df.columns, [f"R{i:02d}", f"R{i}"])
-
-            if col_r:
-                nuevo = f"dia_arm_{i:02d}_in"
-                data[nuevo] = limpiar_numero(df[col_r]) * 2.0
-                radial_cols.append(nuevo)
+    for etiqueta, col in id_las_cols:
+        nuevo = f"{etiqueta}_in"
+        data[nuevo] = limpiar_numero(df[col])
+        id_arm_cols.append(nuevo)
 
     data = data.dropna(subset=["depth_ft", "id_min_in", "id_avg_in", "id_max_in"])
     data = data.sort_values("depth_ft").reset_index(drop=True)
@@ -429,10 +448,38 @@ def procesar_datos(
 
     data["out_of_physical_range"] = data["id_max_in"] > data["case_od_in"]
 
-    return data, radial_cols
+    return data, r_original_cols, id_arm_cols
 
 
-def textos_hover(data):
+def construir_lineas_r_hover(row, r_original_cols):
+    if not r_original_cols:
+        return "R01 a R24: N/D"
+
+    partes = []
+
+    for i in range(1, 25):
+        col = f"R{i:02d}_in"
+
+        if col in row.index:
+            partes.append(f"R{i:02d}: {fmt(row[col], 3, ' in')}")
+        else:
+            partes.append(f"R{i:02d}: N/D")
+
+    linea_1 = " | ".join(partes[0:6])
+    linea_2 = " | ".join(partes[6:12])
+    linea_3 = " | ".join(partes[12:18])
+    linea_4 = " | ".join(partes[18:24])
+
+    return (
+        f"<b>Valores R01 a R24</b><br>"
+        f"{linea_1}<br>"
+        f"{linea_2}<br>"
+        f"{linea_3}<br>"
+        f"{linea_4}"
+    )
+
+
+def textos_hover(data, r_original_cols):
     textos = []
 
     for _, row in data.iterrows():
@@ -453,7 +500,8 @@ def textos_hover(data):
             f"Ovalidad calculada: {fmt(row['ovality_calc_in'], 3, ' in')}<br>"
             f"Espesor remanente por IDMX: {fmt(row['remaining_wall_in'], 3, ' in')}<br>"
             f"Integridad por pared: {fmt(row['integrity_pct'], 1, ' %')}<br>"
-            f"Pérdida de pared por IDMX: {fmt(row['metal_loss_wall_pct'], 1, ' %')}"
+            f"Pérdida de pared por IDMX: {fmt(row['metal_loss_wall_pct'], 1, ' %')}<br><br>"
+            f"{construir_lineas_r_hover(row, r_original_cols)}"
         )
 
         textos.append(texto)
@@ -461,17 +509,43 @@ def textos_hover(data):
     return textos
 
 
-def construir_superficie(data, radial_cols):
-    if len(radial_cols) >= 6:
-        diametros = data[radial_cols].copy()
+def construir_superficie(data, r_original_cols, id_arm_cols):
+    if len(r_original_cols) >= 6:
+        radios_df = data[r_original_cols].copy()
 
-        for col in radial_cols:
-            diametros[col] = diametros[col].fillna(data["id_avg_in"])
+        for col in r_original_cols:
+            radios_df[col] = radios_df[col].fillna(data["id_avg_in"] / 2)
 
-        radios = diametros.to_numpy(dtype=float) / 2
-        radios = np.clip(radios, 0, data["case_od_in"].to_numpy().reshape(-1, 1) / 2)
+        radios = radios_df.to_numpy(dtype=float)
 
-        theta = np.linspace(0, 2 * np.pi, len(radial_cols), endpoint=False)
+        limite_radio = np.maximum(
+            data["case_od_in"].to_numpy().reshape(-1, 1) / 2 * 1.40,
+            data["nominal_id_in"].to_numpy().reshape(-1, 1) / 2 * 1.40
+        )
+
+        radios = np.clip(radios, 0, limite_radio)
+
+        theta = np.linspace(0, 2 * np.pi, len(r_original_cols), endpoint=False)
+
+        radios = np.column_stack([radios, radios[:, 0]])
+        theta = np.append(theta, 2 * np.pi)
+
+    elif len(id_arm_cols) >= 6:
+        diametros_df = data[id_arm_cols].copy()
+
+        for col in id_arm_cols:
+            diametros_df[col] = diametros_df[col].fillna(data["id_avg_in"])
+
+        radios = diametros_df.to_numpy(dtype=float) / 2
+
+        limite_radio = np.maximum(
+            data["case_od_in"].to_numpy().reshape(-1, 1) / 2 * 1.40,
+            data["nominal_id_in"].to_numpy().reshape(-1, 1) / 2 * 1.40
+        )
+
+        radios = np.clip(radios, 0, limite_radio)
+
+        theta = np.linspace(0, 2 * np.pi, len(id_arm_cols), endpoint=False)
 
         radios = np.column_stack([radios, radios[:, 0]])
         theta = np.append(theta, 2 * np.pi)
@@ -482,8 +556,10 @@ def construir_superficie(data, radial_cols):
         rx = data["id_max_in"].fillna(data["id_avg_in"]).to_numpy() / 2
         ry = data["id_min_in"].fillna(data["id_avg_in"]).to_numpy() / 2
 
-        rx = np.clip(rx, 0, data["case_od_in"].to_numpy() / 2)
-        ry = np.clip(ry, 0, data["case_od_in"].to_numpy() / 2)
+        limite = data["case_od_in"].to_numpy() / 2 * 1.40
+
+        rx = np.clip(rx, 0, limite)
+        ry = np.clip(ry, 0, limite)
 
         radios = []
 
@@ -509,19 +585,19 @@ def construir_superficie(data, radial_cols):
     return x, y, z
 
 
-def grafico_3d(data, radial_cols, max_points):
+def grafico_3d(data, r_original_cols, id_arm_cols, max_points):
     if len(data) > max_points:
         indices = np.linspace(0, len(data) - 1, max_points).astype(int)
         data_plot = data.iloc[indices].copy()
     else:
         data_plot = data.copy()
 
-    x, y, z = construir_superficie(data_plot, radial_cols)
+    x, y, z = construir_superficie(data_plot, r_original_cols, id_arm_cols)
 
     indice = data_plot["indice_color_pct"].fillna(0).to_numpy()
     indice_grid = np.repeat(indice.reshape(-1, 1), x.shape[1], axis=1)
 
-    textos = textos_hover(data_plot)
+    textos = textos_hover(data_plot, r_original_cols)
 
     fig = go.Figure()
 
@@ -576,12 +652,12 @@ def grafico_3d(data, radial_cols, max_points):
                 colorscale=COLOR_SCALE_ESTADO,
                 cmin=-100,
                 cmax=100,
-                opacity=0.25
+                opacity=0.28
             ),
             hovertext=textos_hover_superficie,
             hovertemplate="%{hovertext}<extra></extra>",
             hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
-            name="Lectura sobre casing",
+            name="Lectura R01 a R24",
             showlegend=True
         )
     )
@@ -606,7 +682,7 @@ def grafico_3d(data, radial_cols, max_points):
     )
 
     fig.update_layout(
-        height=780,
+        height=820,
         scene=dict(
             xaxis_title="X, in",
             yaxis_title="Y, in",
@@ -615,7 +691,7 @@ def grafico_3d(data, radial_cols, max_points):
             aspectmode="manual",
             aspectratio=dict(x=1, y=1, z=4),
         ),
-        margin=dict(l=0, r=0, t=80, b=0),
+        margin=dict(l=0, r=0, t=90, b=0),
         legend=dict(orientation="h"),
         hovermode="closest"
     )
@@ -745,6 +821,10 @@ def crear_intervalos(data):
     return pd.DataFrame(intervalos)
 
 
+def columnas_r_para_tabla(r_original_cols):
+    return [col for col in [f"R{i:02d}_in" for i in range(1, 25)] if col in r_original_cols]
+
+
 with st.sidebar:
     st.header("Archivo")
 
@@ -826,7 +906,8 @@ st.dataframe(RANGOS_ESTADO, use_container_width=True, hide_index=True)
 st.caption(
     "Nota: desgaste se calcula con IDMX respecto al ID nominal. "
     "Colapso se calcula con IDMN respecto al ID nominal. "
-    "El estado mostrado toma el efecto dominante entre desgaste y colapso."
+    "El estado mostrado toma el efecto dominante entre desgaste y colapso. "
+    "Los valores R01 a R24 se muestran en el hover del 3D cuando existen en el LAS."
 )
 
 
@@ -875,7 +956,7 @@ with m4:
 
 
 try:
-    data, radial_cols = procesar_datos(
+    data, r_original_cols, id_arm_cols = procesar_datos(
         df,
         col_depth,
         col_idmn,
@@ -924,6 +1005,12 @@ k5.metric("Menor IDMN", f"{data_filtrada['id_min_in'].min():.3f} in")
 k6.metric("Mayor IDMX", f"{data_filtrada['id_max_in'].max():.3f} in")
 
 
+if r_original_cols:
+    st.success(f"Se detectaron {len(r_original_cols)} columnas de radio: R01 a R{len(r_original_cols):02d}.")
+else:
+    st.warning("No se detectaron columnas R01 a R24. El 3D usará IDMN, IDAV e IDMX para construir una geometría aproximada.")
+
+
 fuera_rango = int(data_filtrada["out_of_physical_range"].sum())
 
 if fuera_rango > 0:
@@ -935,11 +1022,11 @@ if fuera_rango > 0:
 
 st.subheader("Tubular 3D por estado del casing")
 st.info(
-    "Pasa el cursor sobre los puntos coloreados de la pared del casing para ver la lectura completa."
+    "Pasa el cursor sobre los puntos coloreados de la pared del casing para ver MD, estado, IDMN, IDAV, IDMX y valores R01 a R24."
 )
 
 st.plotly_chart(
-    grafico_3d(data_filtrada, radial_cols, max_points),
+    grafico_3d(data_filtrada, r_original_cols, id_arm_cols, max_points),
     use_container_width=True
 )
 
@@ -982,6 +1069,17 @@ columnas_top = [
 ]
 
 st.dataframe(top[columnas_top].round(4), use_container_width=True)
+
+
+st.subheader("Lectura R01 a R24 por profundidad")
+
+r_cols_tabla = columnas_r_para_tabla(r_original_cols)
+
+if r_cols_tabla:
+    columnas_r_tabla = ["depth_ft", "estado_casing", "tipo_dominante", "indice_color_pct"] + r_cols_tabla
+    st.dataframe(data_filtrada[columnas_r_tabla].round(4), use_container_width=True)
+else:
+    st.info("El archivo cargado no contiene columnas R01 a R24.")
 
 
 st.subheader("Revisión rápida de zona 350 ft a 450 ft")
@@ -1041,6 +1139,8 @@ columnas_salida = [
     "out_of_physical_range"
 ]
 
+columnas_salida = columnas_salida + r_cols_tabla
+
 st.dataframe(data_filtrada[columnas_salida].round(4), use_container_width=True)
 
 
@@ -1049,6 +1149,6 @@ csv = data_filtrada[columnas_salida].to_csv(index=False).encode("utf-8")
 st.download_button(
     "Descargar tabla procesada CSV",
     data=csv,
-    file_name="casing_estado_por_id_nominal.csv",
+    file_name="casing_estado_r01_r24.csv",
     mime="text/csv"
 )
