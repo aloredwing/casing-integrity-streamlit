@@ -10,7 +10,7 @@ import streamlit as st
 st.set_page_config(page_title="Casing Integrity 3D Viewer", layout="wide")
 
 st.title("Casing Integrity 3D Viewer")
-st.caption("Sube un archivo LAS o Excel del registro caliper para ver el tubular en 3D y detectar mayor desgaste.")
+st.caption("Sube un archivo LAS, Excel o CSV del registro caliper para ver el tubular en 3D y detectar mayor desgaste.")
 
 
 def parse_float(texto, default=None):
@@ -157,6 +157,7 @@ def leer_archivo(archivo):
             return leer_las_desde_texto(texto_unido)
 
         df = pd.read_excel(BytesIO(datos))
+
         meta = {
             "pozo": "",
             "campo": "",
@@ -166,10 +167,12 @@ def leer_archivo(archivo):
             "case_thick": 0.224,
             "fuente": "Excel tabular"
         }
+
         return df, meta
 
     if nombre.endswith(".csv"):
         df = pd.read_csv(archivo)
+
         meta = {
             "pozo": "",
             "campo": "",
@@ -179,6 +182,7 @@ def leer_archivo(archivo):
             "case_thick": 0.224,
             "fuente": "CSV"
         }
+
         return df, meta
 
     raise ValueError("Formato no soportado. Usa LAS, Excel o CSV.")
@@ -191,6 +195,7 @@ def clasificar(integridad):
         return "Moderado"
     if integridad >= 40:
         return "Crítico"
+
     return "Severo"
 
 
@@ -273,8 +278,16 @@ def grafico_3d(data, max_points):
     y = ry_grid * np.sin(theta_grid)
     z = depth_grid
 
-    desgaste = data["metal_loss_pct"].to_numpy()
+    desgaste = data["metal_loss_pct"].fillna(0).to_numpy()
     desgaste_grid = np.repeat(desgaste.reshape(-1, 1), len(theta), axis=1)
+
+    texto_hover = np.array([
+        [
+            f"MD: {prof:.2f} ft<br>Desgaste: {desg:.1f} %"
+            for _ in theta
+        ]
+        for prof, desg in zip(depth, desgaste)
+    ])
 
     fig = go.Figure(
         data=[
@@ -283,7 +296,7 @@ def grafico_3d(data, max_points):
                 y=y,
                 z=z,
                 surfacecolor=desgaste_grid,
-                customdata=desgaste_grid,
+                text=texto_hover,
                 cmin=0,
                 cmax=100,
                 colorscale=[
@@ -294,11 +307,7 @@ def grafico_3d(data, max_points):
                     [1.00, "red"],
                 ],
                 colorbar=dict(title="Desgaste %"),
-                hovertemplate=(
-                    "MD: %{z:.2f} ft<br>"
-                    "Desgaste: %{customdata:.1f} %<br>"
-                    "<extra></extra>"
-                ),
+                hovertemplate="%{text}<extra></extra>",
             )
         ]
     )
@@ -375,6 +384,7 @@ def intervalos_criticos(data, umbral):
         else:
             if bloque:
                 b = pd.DataFrame(bloque)
+
                 intervalos.append({
                     "from_ft": b["depth_ft"].min(),
                     "to_ft": b["depth_ft"].max(),
@@ -384,10 +394,12 @@ def intervalos_criticos(data, umbral):
                     "max_id_in": b["id_max_in"].max(),
                     "max_ovality_in": b["ovality_in"].max()
                 })
+
                 bloque = []
 
     if bloque:
         b = pd.DataFrame(bloque)
+
         intervalos.append({
             "from_ft": b["depth_ft"].min(),
             "to_ft": b["depth_ft"].max(),
@@ -403,20 +415,24 @@ def intervalos_criticos(data, umbral):
 
 with st.sidebar:
     st.header("Archivo")
+
     archivo = st.file_uploader(
         "Sube tu archivo LAS, Excel o CSV",
         type=["las", "xlsx", "xls", "csv"]
     )
 
+
 if archivo is None:
-    st.info("Sube tu archivo LAS o Excel para empezar.")
+    st.info("Sube tu archivo LAS, Excel o CSV para empezar.")
     st.stop()
+
 
 try:
     df, meta = leer_archivo(archivo)
 except Exception as e:
     st.error(f"No pude leer el archivo: {e}")
     st.stop()
+
 
 st.sidebar.header("Datos del casing")
 
@@ -439,9 +455,11 @@ nominal_id = case_od - 2 * wall_thickness
 umbral = st.sidebar.slider("Umbral crítico de integridad, %", 10, 100, 60)
 max_points = st.sidebar.slider("Puntos máximos para 3D", 200, 3000, 1200, 100)
 
+
 st.subheader("Resumen del archivo")
 
 c1, c2, c3, c4 = st.columns(4)
+
 c1.metric("OD casing", f"{case_od:.3f} in")
 c2.metric("ID nominal", f"{nominal_id:.3f} in")
 c3.metric("Espesor nominal", f"{wall_thickness:.3f} in")
@@ -450,8 +468,10 @@ c4.metric("Fuente", meta["fuente"])
 st.write(f"Pozo: **{meta.get('pozo', '')}**")
 st.write(f"Campo: **{meta.get('campo', '')}**")
 
+
 st.subheader("Vista previa de datos leídos")
 st.dataframe(df.head(20), use_container_width=True)
+
 
 columnas = list(df.columns)
 
@@ -461,6 +481,7 @@ idav_default = buscar_columna(columnas, ["IDAV"])
 idmx_default = buscar_columna(columnas, ["IDMX"])
 id11_default = buscar_columna(columnas, ["ID11"])
 id12_default = buscar_columna(columnas, ["ID12"])
+
 
 st.subheader("Mapeo de columnas")
 
@@ -507,6 +528,7 @@ with m3:
         index=opciones.index(id12_default) if id12_default in opciones else 0
     )
 
+
 try:
     data = procesar_datos(
         df,
@@ -524,9 +546,11 @@ except Exception as e:
     st.error(f"No pude procesar los datos: {e}")
     st.stop()
 
+
 if data.empty:
     st.error("No quedaron datos válidos después de limpiar el archivo.")
     st.stop()
+
 
 st.subheader("Filtro de profundidad")
 
@@ -545,12 +569,15 @@ data_filtrada = data[
     (data["depth_ft"] <= rango[1])
 ].copy()
 
+
 k1, k2, k3, k4, k5 = st.columns(5)
+
 k1.metric("MD inicial", f"{data_filtrada['depth_ft'].min():.2f} ft")
 k2.metric("MD final", f"{data_filtrada['depth_ft'].max():.2f} ft")
 k3.metric("Integridad mínima", f"{data_filtrada['integrity_pct'].min():.1f} %")
 k4.metric("Mayor desgaste", f"{data_filtrada['metal_loss_pct'].max():.1f} %")
 k5.metric("Espesor mínimo", f"{data_filtrada['remaining_wall_in'].min():.3f} in")
+
 
 fuera_rango = int(data_filtrada["out_of_physical_range"].sum())
 
@@ -560,11 +587,14 @@ if fuera_rango > 0:
         "Esos puntos aparecen como 100 % de desgaste, pero deben revisarse como posible dato anómalo o lectura fuera de rango físico."
     )
 
+
 st.subheader("Tubular 3D coloreado por desgaste")
 st.plotly_chart(grafico_3d(data_filtrada, max_points), use_container_width=True)
 
+
 st.subheader("Tracks de integridad, desgaste e IDMX")
 st.plotly_chart(grafico_tracks(data_filtrada), use_container_width=True)
+
 
 st.subheader("Profundidades con mayor desgaste")
 
@@ -589,6 +619,7 @@ columnas_top = [
 
 st.dataframe(top[columnas_top].round(4), use_container_width=True)
 
+
 st.subheader("Intervalos críticos")
 
 intervalos = intervalos_criticos(data_filtrada, umbral)
@@ -597,6 +628,7 @@ if intervalos.empty:
     st.success("No se detectaron intervalos por debajo del umbral seleccionado.")
 else:
     st.dataframe(intervalos.round(4), use_container_width=True)
+
 
 st.subheader("Tabla procesada completa")
 
@@ -622,6 +654,7 @@ columnas_salida = [
 ]
 
 st.dataframe(data_filtrada[columnas_salida].round(4), use_container_width=True)
+
 
 csv = data_filtrada[columnas_salida].to_csv(index=False).encode("utf-8")
 
