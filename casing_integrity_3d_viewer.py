@@ -10,12 +10,8 @@ import streamlit as st
 st.set_page_config(page_title="Casing Integrity 3D Viewer", layout="wide")
 
 st.title("Casing Integrity 3D Viewer")
-st.caption("Sube un archivo .LAS o Excel del registro caliper para ver el tubular en 3D y detectar mayor desgaste.")
+st.caption("Sube un archivo LAS o Excel del registro caliper para ver el tubular en 3D y detectar mayor desgaste.")
 
-
-# =========================
-# FUNCIONES PARA LEER DATOS
-# =========================
 
 def parse_float(texto, default=None):
     if texto is None:
@@ -101,8 +97,8 @@ def leer_las_desde_texto(texto):
         try:
             valores = [float(x.replace(",", ".")) for x in partes[:len(curvas)]]
             filas.append(valores)
-        except:
-            pass
+        except ValueError:
+            continue
 
     if not filas:
         raise ValueError("No se encontraron datos numéricos en el LAS.")
@@ -152,7 +148,12 @@ def leer_archivo(archivo):
 
         texto_unido = "\n".join(celdas)
 
-        if "~Version" in texto_unido or "~VERSION" in texto_unido or "~Curve" in texto_unido or "~CURVE" in texto_unido:
+        if (
+            "~Version" in texto_unido
+            or "~VERSION" in texto_unido
+            or "~Curve" in texto_unido
+            or "~CURVE" in texto_unido
+        ):
             return leer_las_desde_texto(texto_unido)
 
         df = pd.read_excel(BytesIO(datos))
@@ -182,10 +183,6 @@ def leer_archivo(archivo):
 
     raise ValueError("Formato no soportado. Usa LAS, Excel o CSV.")
 
-
-# =========================
-# CÁLCULO DE INTEGRIDAD
-# =========================
 
 def clasificar(integridad):
     if integridad >= 80:
@@ -249,10 +246,6 @@ def procesar_datos(
     return data
 
 
-# =========================
-# GRÁFICOS
-# =========================
-
 def grafico_3d(data, max_points):
     if len(data) > max_points:
         indices = np.linspace(0, len(data) - 1, max_points).astype(int)
@@ -280,7 +273,8 @@ def grafico_3d(data, max_points):
     y = ry_grid * np.sin(theta_grid)
     z = depth_grid
 
-    color = np.repeat(data["metal_loss_pct"].to_numpy().reshape(-1, 1), len(theta), axis=1)
+    desgaste = data["metal_loss_pct"].to_numpy()
+    desgaste_grid = np.repeat(desgaste.reshape(-1, 1), len(theta), axis=1)
 
     fig = go.Figure(
         data=[
@@ -288,7 +282,8 @@ def grafico_3d(data, max_points):
                 x=x,
                 y=y,
                 z=z,
-                surfacecolor=color,
+                surfacecolor=desgaste_grid,
+                customdata=desgaste_grid,
                 cmin=0,
                 cmax=100,
                 colorscale=[
@@ -301,7 +296,8 @@ def grafico_3d(data, max_points):
                 colorbar=dict(title="Desgaste %"),
                 hovertemplate=(
                     "MD: %{z:.2f} ft<br>"
-                    "Desgaste: %{surfacecolor:.1f} %<extra></extra>"
+                    "Desgaste: %{customdata:.1f} %<br>"
+                    "<extra></extra>"
                 ),
             )
         ]
@@ -405,10 +401,6 @@ def intervalos_criticos(data, umbral):
     return pd.DataFrame(intervalos)
 
 
-# =========================
-# INTERFAZ STREAMLIT
-# =========================
-
 with st.sidebar:
     st.header("Archivo")
     archivo = st.file_uploader(
@@ -417,7 +409,7 @@ with st.sidebar:
     )
 
 if archivo is None:
-    st.info("Sube tu archivo .LAS o Excel para empezar.")
+    st.info("Sube tu archivo LAS o Excel para empezar.")
     st.stop()
 
 try:
