@@ -10,7 +10,10 @@ import streamlit as st
 st.set_page_config(page_title="Casing Integrity 3D Viewer", layout="wide")
 
 st.title("Casing Integrity 3D Viewer")
-st.caption("Sube un archivo LAS, Excel o CSV del registro caliper para ver el tubular en 3D y detectar mayor desgaste.")
+st.caption(
+    "Sube un archivo LAS, Excel o CSV del registro caliper para ver el tubular en 3D "
+    "y detectar mayor desgaste."
+)
 
 
 def parse_float(texto, default=None):
@@ -279,37 +282,82 @@ def grafico_3d(data, max_points):
     z = depth_grid
 
     desgaste = data["metal_loss_pct"].fillna(0).to_numpy()
+    integridad = data["integrity_pct"].fillna(0).to_numpy()
+    espesor = data["remaining_wall_in"].fillna(0).to_numpy()
+    idmx = data["id_max_in"].fillna(0).to_numpy()
+
     desgaste_grid = np.repeat(desgaste.reshape(-1, 1), len(theta), axis=1)
 
-    texto_hover = np.array([
+    custom_surface = np.stack(
         [
-            f"MD: {prof:.2f} ft<br>Desgaste: {desg:.1f} %"
-            for _ in theta
-        ]
-        for prof, desg in zip(depth, desgaste)
-    ])
+            desgaste_grid,
+            np.repeat(integridad.reshape(-1, 1), len(theta), axis=1),
+            np.repeat(espesor.reshape(-1, 1), len(theta), axis=1),
+            np.repeat(idmx.reshape(-1, 1), len(theta), axis=1),
+        ],
+        axis=-1
+    )
 
-    fig = go.Figure(
-        data=[
-            go.Surface(
-                x=x,
-                y=y,
-                z=z,
-                surfacecolor=desgaste_grid,
-                text=texto_hover,
-                cmin=0,
-                cmax=100,
-                colorscale=[
-                    [0.00, "green"],
-                    [0.40, "lightgreen"],
-                    [0.60, "yellow"],
-                    [0.80, "orange"],
-                    [1.00, "red"],
-                ],
-                colorbar=dict(title="Desgaste %"),
-                hovertemplate="%{text}<extra></extra>",
-            )
+    custom_centro = np.column_stack(
+        [
+            desgaste,
+            integridad,
+            espesor,
+            idmx
         ]
+    )
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Surface(
+            x=x,
+            y=y,
+            z=z,
+            surfacecolor=desgaste_grid,
+            customdata=custom_surface,
+            cmin=0,
+            cmax=100,
+            colorscale=[
+                [0.00, "green"],
+                [0.40, "lightgreen"],
+                [0.60, "yellow"],
+                [0.80, "orange"],
+                [1.00, "red"],
+            ],
+            colorbar=dict(title="Desgaste %"),
+            hovertemplate=(
+                "MD: %{z:.2f} ft<br>"
+                "Desgaste: %{customdata[0]:.1f} %<br>"
+                "Integridad: %{customdata[1]:.1f} %<br>"
+                "Espesor remanente: %{customdata[2]:.3f} in<br>"
+                "IDMX: %{customdata[3]:.3f} in"
+                "<extra></extra>"
+            ),
+            name="Tubular"
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter3d(
+            x=np.zeros(len(depth)),
+            y=np.zeros(len(depth)),
+            z=depth,
+            mode="lines+markers",
+            line=dict(width=5, color="black"),
+            marker=dict(size=4, color=desgaste, colorscale="Turbo", cmin=0, cmax=100),
+            customdata=custom_centro,
+            name="Línea de lectura",
+            hovertemplate=(
+                "<b>Lectura del casing</b><br>"
+                "MD: %{z:.2f} ft<br>"
+                "Desgaste: %{customdata[0]:.1f} %<br>"
+                "Integridad: %{customdata[1]:.1f} %<br>"
+                "Espesor remanente: %{customdata[2]:.3f} in<br>"
+                "IDMX: %{customdata[3]:.3f} in"
+                "<extra></extra>"
+            ),
+        )
     )
 
     fig.update_layout(
@@ -323,6 +371,7 @@ def grafico_3d(data, max_points):
             aspectratio=dict(x=1, y=1, z=4),
         ),
         margin=dict(l=0, r=0, t=20, b=0),
+        legend=dict(orientation="h")
     )
 
     return fig
@@ -589,6 +638,7 @@ if fuera_rango > 0:
 
 
 st.subheader("Tubular 3D coloreado por desgaste")
+st.info("Para ver la lectura exacta, pasa el mouse sobre la línea central negra del tubular.")
 st.plotly_chart(grafico_3d(data_filtrada, max_points), use_container_width=True)
 
 
