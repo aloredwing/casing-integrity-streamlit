@@ -11,38 +11,76 @@ st.set_page_config(page_title="Casing Integrity 3D Viewer", layout="wide")
 
 st.title("Casing Integrity 3D Viewer")
 st.caption(
-    "Sube un archivo LAS, Excel o CSV del registro caliper. "
-    "La app diferencia picos puntuales, problemas sostenidos e intervalos marcados manualmente."
+    "Sube un archivo LAS, Excel o CSV. "
+    "La app clasifica el casing por desviación del ID nominal: colapso, buen estado o desgaste."
 )
 
 
 NULL_VALUES = [-999.25, -999.2500, -999, -999.0]
 
 
-RANGOS_PROBLEMA = pd.DataFrame(
+RANGOS_ESTADO = pd.DataFrame(
     [
         {
-            "Clase": "Bajo",
-            "Rango": "0 a < 35 %",
-            "Interpretación": "Sin anomalía sostenida relevante"
+            "Estado": "Colapso Crítico",
+            "Rango respecto al ID nominal": "ID - 40% a -100%",
+            "Interpretación": "Reducción extrema del diámetro interno. Revisar como condición crítica."
         },
         {
-            "Clase": "Moderado",
-            "Rango": "35 a < 60 %",
-            "Interpretación": "Revisar tendencia, pico o intervalo"
+            "Estado": "Colapso Severo",
+            "Rango respecto al ID nominal": "ID - 20% a -40%",
+            "Interpretación": "Reducción severa del diámetro interno."
         },
         {
-            "Clase": "Crítico",
-            "Rango": "60 a < 80 %",
-            "Interpretación": "Posible problema sostenido de casing"
+            "Estado": "Colapso Moderado",
+            "Rango respecto al ID nominal": "ID - 10% a -20%",
+            "Interpretación": "Reducción moderada del diámetro interno."
         },
         {
-            "Clase": "Severo",
-            "Rango": "80 a 100 %",
-            "Interpretación": "Alta probabilidad de restricción, deformación, desgaste severo o intervalo crítico marcado"
+            "Estado": "Colapso Leve",
+            "Rango respecto al ID nominal": "ID - 0% a -10%",
+            "Interpretación": "Reducción leve del diámetro interno."
+        },
+        {
+            "Estado": "Buen estado",
+            "Rango respecto al ID nominal": "Cercano al ID nominal",
+            "Interpretación": "Sin desviación relevante frente al ID nominal."
+        },
+        {
+            "Estado": "Desgaste Leve",
+            "Rango respecto al ID nominal": "ID + 0% a +10%",
+            "Interpretación": "Aumento leve del diámetro interno."
+        },
+        {
+            "Estado": "Desgaste Moderado",
+            "Rango respecto al ID nominal": "ID + 10% a +20%",
+            "Interpretación": "Aumento moderado del diámetro interno."
+        },
+        {
+            "Estado": "Desgaste Severo",
+            "Rango respecto al ID nominal": "ID + 20% a +40%",
+            "Interpretación": "Aumento severo del diámetro interno."
+        },
+        {
+            "Estado": "Desgaste Crítico",
+            "Rango respecto al ID nominal": "ID + 40% a +100%",
+            "Interpretación": "Aumento extremo del diámetro interno. Revisar como condición crítica."
         },
     ]
 )
+
+
+COLOR_SCALE_ESTADO = [
+    [0.00, "#2b004f"],
+    [0.30, "#0033cc"],
+    [0.40, "#00a6ff"],
+    [0.45, "#4ddbc8"],
+    [0.50, "#00a651"],
+    [0.55, "#ffff00"],
+    [0.60, "#ff9900"],
+    [0.70, "#ff0000"],
+    [1.00, "#7a0000"],
+]
 
 
 def parse_float(texto, default=None):
@@ -86,26 +124,56 @@ def buscar_columna(columnas, opciones):
     return None
 
 
-def clasificar_problema(score):
-    if score >= 80:
-        return "Severo"
-    if score >= 60:
-        return "Crítico"
-    if score >= 35:
-        return "Moderado"
+def clasificar_porcentaje_desgaste(pct):
+    if pct >= 40:
+        return "Desgaste Crítico"
+    if pct >= 20:
+        return "Desgaste Severo"
+    if pct >= 10:
+        return "Desgaste Moderado"
+    if pct > 0:
+        return "Desgaste Leve"
 
-    return "Bajo"
+    return "Buen estado"
 
 
-def clasificar_integridad(integridad):
-    if integridad >= 80:
-        return "Aceptable"
-    if integridad >= 60:
-        return "Moderado"
-    if integridad >= 40:
-        return "Crítico"
+def clasificar_porcentaje_colapso(pct):
+    if pct >= 40:
+        return "Colapso Crítico"
+    if pct >= 20:
+        return "Colapso Severo"
+    if pct >= 10:
+        return "Colapso Moderado"
+    if pct > 0:
+        return "Colapso Leve"
 
-    return "Severo"
+    return "Buen estado"
+
+
+def clasificar_estado(row, tolerancia_buen_estado):
+    desgaste = row["desgaste_id_pct"]
+    colapso = row["colapso_id_pct"]
+
+    if desgaste <= tolerancia_buen_estado and colapso <= tolerancia_buen_estado:
+        return "Buen estado"
+
+    if colapso > desgaste:
+        return clasificar_porcentaje_colapso(colapso)
+
+    return clasificar_porcentaje_desgaste(desgaste)
+
+
+def tipo_dominante(row, tolerancia_buen_estado):
+    desgaste = row["desgaste_id_pct"]
+    colapso = row["colapso_id_pct"]
+
+    if desgaste <= tolerancia_buen_estado and colapso <= tolerancia_buen_estado:
+        return "Buen estado"
+
+    if colapso > desgaste:
+        return "Colapso"
+
+    return "Desgaste"
 
 
 def leer_las_desde_texto(texto):
@@ -258,83 +326,6 @@ def leer_archivo(archivo):
     raise ValueError("Formato no soportado. Usa LAS, Excel o CSV.")
 
 
-def ventana_puntos_por_ft(depth, ventana_ft):
-    d = pd.Series(depth).dropna().sort_values().to_numpy()
-
-    if len(d) < 3:
-        return 5
-
-    paso = np.nanmedian(np.diff(d))
-
-    if not np.isfinite(paso) or paso <= 0:
-        paso = 0.125
-
-    puntos = int(round(float(ventana_ft) / paso))
-    puntos = max(5, puntos)
-
-    if puntos % 2 == 0:
-        puntos += 1
-
-    return puntos
-
-
-def suavizar_sostenido(serie, ventana_puntos):
-    return (
-        pd.Series(serie)
-        .rolling(window=ventana_puntos, center=True, min_periods=max(3, ventana_puntos // 3))
-        .median()
-        .bfill()
-        .ffill()
-        .to_numpy()
-    )
-
-
-def crear_motivo(row):
-    motivos = []
-
-    if row["manual_alert_pct"] > 0:
-        motivos.append("intervalo marcado manualmente por indicio visual o reporte")
-
-    if row["wear_score_sustained_pct"] >= 35:
-        motivos.append("aumento sostenido de IDMX o desgaste")
-
-    if row["restriction_score_sustained_pct"] >= 35:
-        motivos.append("reducción sostenida de IDMN o posible restricción")
-
-    if row["ovality_score_sustained_pct"] >= 35:
-        motivos.append("ovalidad sostenida")
-
-    if row["eccentricity_score_sustained_pct"] >= 35:
-        motivos.append("excentricidad sostenida")
-
-    if row["jump_score_sustained_pct"] >= 35:
-        motivos.append("cambio brusco sostenido")
-
-    if row["spike_score_pct"] >= 60 and row["problem_score_calc_pct"] < 35:
-        motivos.append("pico puntual de lectura, revisar como posible ruido, collar, suciedad o centralización")
-
-    if not motivos:
-        return "sin anomalía sostenida relevante"
-
-    return ", ".join(motivos)
-
-
-def tipo_alerta(row):
-    if row["manual_alert_pct"] >= 60:
-        return "Intervalo marcado"
-
-    if row["problem_score_calc_pct"] >= 60:
-        return "Problema sostenido"
-
-    if row["problem_score_calc_pct"] >= 35:
-        return "Tendencia moderada"
-
-    if row["spike_score_pct"] >= 60:
-        return "Pico puntual"
-
-    return "Normal"
-
-
 def procesar_datos(
     df,
     col_depth,
@@ -344,15 +335,7 @@ def procesar_datos(
     case_od,
     nominal_id,
     wall_thickness,
-    restriction_ref,
-    ovality_ref,
-    eccentricity_ref,
-    jump_ref,
-    ventana_sostenida_ft,
-    usar_intervalo_manual,
-    manual_from_ft,
-    manual_to_ft,
-    manual_score_pct
+    tolerancia_buen_estado
 ):
     data = pd.DataFrame()
 
@@ -402,107 +385,49 @@ def procesar_datos(
     data = data.dropna(subset=["depth_ft", "id_min_in", "id_avg_in", "id_max_in"])
     data = data.sort_values("depth_ft").reset_index(drop=True)
 
+    data["desgaste_id_in"] = data["id_max_in"] - data["nominal_id_in"]
+    data["colapso_id_in"] = data["nominal_id_in"] - data["id_min_in"]
+
+    data["desgaste_id_pct"] = (
+        data["desgaste_id_in"].clip(lower=0) / data["nominal_id_in"] * 100
+    ).clip(lower=0, upper=100)
+
+    data["colapso_id_pct"] = (
+        data["colapso_id_in"].clip(lower=0) / data["nominal_id_in"] * 100
+    ).clip(lower=0, upper=100)
+
+    data["estado_casing"] = data.apply(
+        lambda row: clasificar_estado(row, tolerancia_buen_estado),
+        axis=1
+    )
+
+    data["tipo_dominante"] = data.apply(
+        lambda row: tipo_dominante(row, tolerancia_buen_estado),
+        axis=1
+    )
+
+    data["indice_color_pct"] = np.where(
+        data["tipo_dominante"] == "Colapso",
+        -data["colapso_id_pct"],
+        data["desgaste_id_pct"]
+    )
+
+    data.loc[data["estado_casing"] == "Buen estado", "indice_color_pct"] = 0
+    data["indice_color_pct"] = data["indice_color_pct"].clip(lower=-100, upper=100)
+
     data["remaining_wall_raw_in"] = (data["case_od_in"] - data["id_max_in"]) / 2
     data["remaining_wall_in"] = data["remaining_wall_raw_in"].clip(lower=0)
 
     data["integrity_raw_pct"] = 100 * data["remaining_wall_raw_in"] / data["nominal_wall_in"]
     data["integrity_pct"] = data["integrity_raw_pct"].clip(lower=0, upper=100)
 
-    data["metal_loss_pct"] = 100 - data["integrity_pct"]
-    data["metal_loss_pct"] = data["metal_loss_pct"].clip(lower=0, upper=100)
-
-    data["id_enlargement_max_in"] = data["id_max_in"] - data["nominal_id_in"]
-    data["id_restriction_min_in"] = data["nominal_id_in"] - data["id_min_in"]
+    data["metal_loss_wall_pct"] = 100 - data["integrity_pct"]
+    data["metal_loss_wall_pct"] = data["metal_loss_wall_pct"].clip(lower=0, upper=100)
 
     data["diameter_spread_in"] = data["id_max_in"] - data["id_min_in"]
     data["ovality_calc_in"] = data["diameter_spread_in"].clip(lower=0)
 
-    data["wear_score_raw_pct"] = np.clip(
-        (data["id_enlargement_max_in"].clip(lower=0) / max(2 * wall_thickness, 0.001)) * 100,
-        0,
-        100
-    )
-
-    data["restriction_score_raw_pct"] = np.clip(
-        (data["id_restriction_min_in"].clip(lower=0) / max(restriction_ref, 0.001)) * 100,
-        0,
-        100
-    )
-
-    data["ovality_score_raw_pct"] = np.clip(
-        (data["ovality_calc_in"].clip(lower=0) / max(ovality_ref, 0.001)) * 100,
-        0,
-        100
-    )
-
-    data["eccentricity_score_raw_pct"] = np.clip(
-        (data["eccentricity_in"].fillna(0).clip(lower=0) / max(eccentricity_ref, 0.001)) * 100,
-        0,
-        100
-    )
-
-    salto_idmn = data["id_min_in"].diff().abs().fillna(0)
-    salto_idmx = data["id_max_in"].diff().abs().fillna(0)
-
-    data["jump_score_raw_pct"] = np.clip(
-        (np.maximum(salto_idmn, salto_idmx) / max(jump_ref, 0.001)) * 100,
-        0,
-        100
-    )
-
-    ventana_puntos = ventana_puntos_por_ft(data["depth_ft"], ventana_sostenida_ft)
-
-    for base in ["wear", "restriction", "ovality", "eccentricity", "jump"]:
-        data[f"{base}_score_sustained_pct"] = suavizar_sostenido(
-            data[f"{base}_score_raw_pct"],
-            ventana_puntos
-        )
-
-    data["spike_score_pct"] = data[
-        [
-            "wear_score_raw_pct",
-            "restriction_score_raw_pct",
-            "ovality_score_raw_pct",
-            "eccentricity_score_raw_pct",
-            "jump_score_raw_pct"
-        ]
-    ].max(axis=1)
-
-    data["problem_score_calc_pct"] = data[
-        [
-            "wear_score_sustained_pct",
-            "restriction_score_sustained_pct",
-            "ovality_score_sustained_pct",
-            "eccentricity_score_sustained_pct",
-            "jump_score_sustained_pct"
-        ]
-    ].max(axis=1)
-
-    if usar_intervalo_manual:
-        desde = min(manual_from_ft, manual_to_ft)
-        hasta = max(manual_from_ft, manual_to_ft)
-
-        data["manual_alert_pct"] = np.where(
-            (data["depth_ft"] >= desde) & (data["depth_ft"] <= hasta),
-            manual_score_pct,
-            0.0
-        )
-    else:
-        data["manual_alert_pct"] = 0.0
-
-    data["problem_score_pct"] = data[
-        [
-            "problem_score_calc_pct",
-            "manual_alert_pct"
-        ]
-    ].max(axis=1)
-
     data["out_of_physical_range"] = data["id_max_in"] > data["case_od_in"]
-    data["integrity_class"] = data["integrity_pct"].apply(clasificar_integridad)
-    data["problem_class"] = data["problem_score_pct"].apply(clasificar_problema)
-    data["alert_type"] = data.apply(tipo_alerta, axis=1)
-    data["probable_cause"] = data.apply(crear_motivo, axis=1)
-    data["smoothing_window_points"] = ventana_puntos
 
     return data, radial_cols
 
@@ -514,22 +439,21 @@ def textos_hover(data):
         texto = (
             f"<b>Lectura del casing</b><br>"
             f"MD: {fmt(row['depth_ft'], 2, ' ft')}<br>"
-            f"Tipo de alerta: {row['alert_type']}<br>"
-            f"Problema mostrado: {fmt(row['problem_score_pct'], 1, ' %')}<br>"
-            f"Problema calculado: {fmt(row['problem_score_calc_pct'], 1, ' %')}<br>"
-            f"Intervalo manual: {fmt(row['manual_alert_pct'], 1, ' %')}<br>"
-            f"Pico puntual: {fmt(row['spike_score_pct'], 1, ' %')}<br>"
-            f"Clasificación: {row['problem_class']}<br>"
-            f"Desgaste por IDMX: {fmt(row['metal_loss_pct'], 1, ' %')}<br>"
-            f"Integridad: {fmt(row['integrity_pct'], 1, ' %')}<br>"
-            f"Espesor remanente: {fmt(row['remaining_wall_in'], 3, ' in')}<br>"
+            f"Estado: {row['estado_casing']}<br>"
+            f"Tipo dominante: {row['tipo_dominante']}<br>"
+            f"Índice color: {fmt(row['indice_color_pct'], 2, ' %')}<br>"
+            f"Desgaste respecto al ID: {fmt(row['desgaste_id_pct'], 2, ' %')}<br>"
+            f"Colapso respecto al ID: {fmt(row['colapso_id_pct'], 2, ' %')}<br>"
+            f"ID nominal: {fmt(row['nominal_id_in'], 3, ' in')}<br>"
             f"IDMN: {fmt(row['id_min_in'], 3, ' in')}<br>"
             f"IDAV: {fmt(row['id_avg_in'], 3, ' in')}<br>"
             f"IDMX: {fmt(row['id_max_in'], 3, ' in')}<br>"
-            f"Restricción IDMN: {fmt(row['id_restriction_min_in'], 3, ' in')}<br>"
+            f"Aumento IDMX: {fmt(row['desgaste_id_in'], 3, ' in')}<br>"
+            f"Reducción IDMN: {fmt(row['colapso_id_in'], 3, ' in')}<br>"
             f"Ovalidad calculada: {fmt(row['ovality_calc_in'], 3, ' in')}<br>"
-            f"Excentricidad: {fmt(row['eccentricity_in'], 3, ' in')}<br>"
-            f"Motivo probable: {row['probable_cause']}"
+            f"Espesor remanente por IDMX: {fmt(row['remaining_wall_in'], 3, ' in')}<br>"
+            f"Integridad por pared: {fmt(row['integrity_pct'], 1, ' %')}<br>"
+            f"Pérdida de pared por IDMX: {fmt(row['metal_loss_wall_pct'], 1, ' %')}"
         )
 
         textos.append(texto)
@@ -585,7 +509,7 @@ def construir_superficie(data, radial_cols):
     return x, y, z
 
 
-def grafico_3d(data, radial_cols, max_points, umbral_problema):
+def grafico_3d(data, radial_cols, max_points):
     if len(data) > max_points:
         indices = np.linspace(0, len(data) - 1, max_points).astype(int)
         data_plot = data.iloc[indices].copy()
@@ -594,8 +518,8 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
 
     x, y, z = construir_superficie(data_plot, radial_cols)
 
-    score = data_plot["problem_score_pct"].fillna(0).to_numpy()
-    score_grid = np.repeat(score.reshape(-1, 1), x.shape[1], axis=1)
+    indice = data_plot["indice_color_pct"].fillna(0).to_numpy()
+    indice_grid = np.repeat(indice.reshape(-1, 1), x.shape[1], axis=1)
 
     textos = textos_hover(data_plot)
 
@@ -606,20 +530,24 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
             x=x,
             y=y,
             z=z,
-            surfacecolor=score_grid,
-            cmin=0,
+            surfacecolor=indice_grid,
+            cmin=-100,
             cmax=100,
-            colorscale=[
-                [0.00, "green"],
-                [0.35, "lightgreen"],
-                [0.60, "yellow"],
-                [0.80, "orange"],
-                [1.00, "red"],
-            ],
+            colorscale=COLOR_SCALE_ESTADO,
             colorbar=dict(
-                title="Problema mostrado %",
-                tickvals=[17.5, 47.5, 70, 90],
-                ticktext=["Bajo", "Moderado", "Crítico", "Severo"]
+                title="Estado casing",
+                tickvals=[-70, -30, -15, -5, 0, 5, 15, 30, 70],
+                ticktext=[
+                    "Colapso crítico",
+                    "Colapso severo",
+                    "Colapso moderado",
+                    "Colapso leve",
+                    "Buen estado",
+                    "Desgaste leve",
+                    "Desgaste moderado",
+                    "Desgaste severo",
+                    "Desgaste crítico"
+                ]
             ),
             hoverinfo="skip",
             name="Casing"
@@ -627,14 +555,14 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
     )
 
     cantidad_angulos = x.shape[1]
-    angulos_lectura = np.linspace(0, cantidad_angulos - 1, min(24, cantidad_angulos)).astype(int)
+    angulos_lectura = np.linspace(0, cantidad_angulos - 1, min(32, cantidad_angulos)).astype(int)
 
     x_hover = x[:, angulos_lectura].reshape(-1)
     y_hover = y[:, angulos_lectura].reshape(-1)
     z_hover = z[:, angulos_lectura].reshape(-1)
 
     textos_hover_superficie = np.repeat(np.array(textos, dtype=object), len(angulos_lectura))
-    score_hover = np.repeat(score, len(angulos_lectura))
+    indice_hover = np.repeat(indice, len(angulos_lectura))
 
     fig.add_trace(
         go.Scatter3d(
@@ -644,17 +572,11 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
             mode="markers",
             marker=dict(
                 size=7,
-                color=score_hover,
-                colorscale=[
-                    [0.00, "green"],
-                    [0.35, "lightgreen"],
-                    [0.60, "yellow"],
-                    [0.80, "orange"],
-                    [1.00, "red"],
-                ],
-                cmin=0,
+                color=indice_hover,
+                colorscale=COLOR_SCALE_ESTADO,
+                cmin=-100,
                 cmax=100,
-                opacity=0.22
+                opacity=0.25
             ),
             hovertext=textos_hover_superficie,
             hovertemplate="%{hovertext}<extra></extra>",
@@ -664,55 +586,27 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
         )
     )
 
-    crit = data_plot[data_plot["problem_score_pct"] >= umbral_problema].copy()
-
-    if not crit.empty:
-        if len(crit) > 160:
-            crit = crit.sort_values("problem_score_pct", ascending=False).head(160)
-            crit = crit.sort_values("depth_ft")
-
-        radio_maximo = np.nanmax(np.sqrt(x ** 2 + y ** 2))
-        r_lateral = radio_maximo + 0.35
-
-        fig.add_trace(
-            go.Scatter3d(
-                x=np.ones(len(crit)) * r_lateral,
-                y=np.zeros(len(crit)),
-                z=crit["depth_ft"],
-                mode="markers",
-                marker=dict(
-                    size=7,
-                    color=crit["problem_score_pct"],
-                    colorscale="Turbo",
-                    cmin=0,
-                    cmax=100,
-                    symbol="diamond"
-                ),
-                hovertext=textos_hover(crit),
-                hovertemplate="%{hovertext}<extra></extra>",
-                hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
-                name="Alertas"
-            )
-        )
-
     fig.add_annotation(
         text=(
-            "<b>Rangos:</b> Bajo &lt;35% | Moderado 35 a 59% | "
-            "Crítico 60 a 79% | Severo ≥80%"
+            "<b>Escala:</b> Colapso crítico ≤ -40% | Colapso severo -20% a -40% | "
+            "Colapso moderado -10% a -20% | Colapso leve 0% a -10% | "
+            "Buen estado ≈ ID nominal | Desgaste leve 0% a 10% | "
+            "Desgaste moderado 10% a 20% | Desgaste severo 20% a 40% | "
+            "Desgaste crítico ≥ 40%"
         ),
         xref="paper",
         yref="paper",
         x=0.01,
-        y=1.05,
+        y=1.07,
         showarrow=False,
         align="left",
-        bgcolor="rgba(255,255,255,0.90)",
+        bgcolor="rgba(255,255,255,0.92)",
         bordercolor="gray",
         borderwidth=1
     )
 
     fig.update_layout(
-        height=760,
+        height=780,
         scene=dict(
             xaxis_title="X, in",
             yaxis_title="Y, in",
@@ -721,7 +615,7 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
             aspectmode="manual",
             aspectratio=dict(x=1, y=1, z=4),
         ),
-        margin=dict(l=0, r=0, t=60, b=0),
+        margin=dict(l=0, r=0, t=80, b=0),
         legend=dict(orientation="h"),
         hovermode="closest"
     )
@@ -729,41 +623,30 @@ def grafico_3d(data, radial_cols, max_points, umbral_problema):
     return fig
 
 
-def grafico_tracks(data, umbral_problema):
+def grafico_estado(data):
     fig = go.Figure()
 
-    curvas = [
-        ("problem_score_pct", "Problema mostrado, %"),
-        ("problem_score_calc_pct", "Problema calculado, %"),
-        ("manual_alert_pct", "Intervalo manual, %"),
-        ("spike_score_pct", "Pico puntual, %"),
-        ("metal_loss_pct", "Desgaste por IDMX, %"),
-        ("restriction_score_sustained_pct", "Restricción IDMN sostenida, %"),
-        ("ovality_score_sustained_pct", "Ovalidad sostenida, %"),
-        ("eccentricity_score_sustained_pct", "Excentricidad sostenida, %"),
-        ("integrity_pct", "Integridad, %"),
-    ]
-
-    for col, nombre in curvas:
-        fig.add_trace(
-            go.Scatter(
-                x=data[col],
-                y=data["depth_ft"],
-                mode="lines",
-                name=nombre
-            )
+    fig.add_trace(
+        go.Scatter(
+            x=data["indice_color_pct"],
+            y=data["depth_ft"],
+            mode="lines",
+            name="Índice estado casing, %"
         )
-
-    fig.add_vline(
-        x=umbral_problema,
-        line_dash="dash",
-        annotation_text="Umbral problema"
     )
 
+    fig.add_vline(x=-40, line_dash="dot", annotation_text="Colapso crítico")
+    fig.add_vline(x=-20, line_dash="dot", annotation_text="Colapso severo")
+    fig.add_vline(x=-10, line_dash="dot", annotation_text="Colapso moderado")
+    fig.add_vline(x=0, line_dash="dash", annotation_text="ID nominal")
+    fig.add_vline(x=10, line_dash="dot", annotation_text="Desgaste moderado")
+    fig.add_vline(x=20, line_dash="dot", annotation_text="Desgaste severo")
+    fig.add_vline(x=40, line_dash="dot", annotation_text="Desgaste crítico")
+
     fig.update_layout(
-        height=600,
+        height=560,
         yaxis=dict(title="MD, ft", autorange="reversed"),
-        xaxis=dict(title="Score / porcentaje, %", range=[0, 100]),
+        xaxis=dict(title="Desviación respecto al ID nominal, %", range=[-100, 100]),
         legend=dict(orientation="h"),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -805,48 +688,59 @@ def grafico_id(data):
     return fig
 
 
-def crear_intervalo(b):
-    fila_max = b.sort_values("problem_score_pct", ascending=False).iloc[0]
-
-    return {
-        "from_ft": b["depth_ft"].min(),
-        "to_ft": b["depth_ft"].max(),
-        "longitud_ft": b["depth_ft"].max() - b["depth_ft"].min(),
-        "max_problem_score_pct": b["problem_score_pct"].max(),
-        "max_problem_calc_pct": b["problem_score_calc_pct"].max(),
-        "max_manual_alert_pct": b["manual_alert_pct"].max(),
-        "max_spike_score_pct": b["spike_score_pct"].max(),
-        "max_metal_loss_pct": b["metal_loss_pct"].max(),
-        "max_restriction_score_pct": b["restriction_score_sustained_pct"].max(),
-        "max_ovality_score_pct": b["ovality_score_sustained_pct"].max(),
-        "max_eccentricity_score_pct": b["eccentricity_score_sustained_pct"].max(),
-        "min_integrity_pct": b["integrity_pct"].min(),
-        "min_idmn_in": b["id_min_in"].min(),
-        "max_idmx_in": b["id_max_in"].max(),
-        "probable_cause": fila_max["probable_cause"],
-        "class": clasificar_problema(b["problem_score_pct"].max())
-    }
-
-
-def intervalos_criticos(data, umbral):
+def crear_intervalos(data):
     data = data.sort_values("depth_ft").copy()
-    data["critico"] = data["problem_score_pct"] >= umbral
 
     intervalos = []
+    estado_actual = None
     bloque = []
 
     for _, row in data.iterrows():
-        if row["critico"]:
+        estado = row["estado_casing"]
+
+        if estado_actual is None:
+            estado_actual = estado
+            bloque = [row]
+            continue
+
+        if estado == estado_actual:
             bloque.append(row)
         else:
-            if bloque:
-                b = pd.DataFrame(bloque)
-                intervalos.append(crear_intervalo(b))
-                bloque = []
+            b = pd.DataFrame(bloque)
+
+            intervalos.append({
+                "from_ft": b["depth_ft"].min(),
+                "to_ft": b["depth_ft"].max(),
+                "longitud_ft": b["depth_ft"].max() - b["depth_ft"].min(),
+                "estado": estado_actual,
+                "min_indice_pct": b["indice_color_pct"].min(),
+                "max_indice_pct": b["indice_color_pct"].max(),
+                "max_desgaste_id_pct": b["desgaste_id_pct"].max(),
+                "max_colapso_id_pct": b["colapso_id_pct"].max(),
+                "min_idmn_in": b["id_min_in"].min(),
+                "max_idmx_in": b["id_max_in"].max(),
+                "max_ovality_in": b["ovality_calc_in"].max()
+            })
+
+            estado_actual = estado
+            bloque = [row]
 
     if bloque:
         b = pd.DataFrame(bloque)
-        intervalos.append(crear_intervalo(b))
+
+        intervalos.append({
+            "from_ft": b["depth_ft"].min(),
+            "to_ft": b["depth_ft"].max(),
+            "longitud_ft": b["depth_ft"].max() - b["depth_ft"].min(),
+            "estado": estado_actual,
+            "min_indice_pct": b["indice_color_pct"].min(),
+            "max_indice_pct": b["indice_color_pct"].max(),
+            "max_desgaste_id_pct": b["desgaste_id_pct"].max(),
+            "max_colapso_id_pct": b["colapso_id_pct"].max(),
+            "min_idmn_in": b["id_min_in"].min(),
+            "max_idmx_in": b["id_max_in"].max(),
+            "max_ovality_in": b["ovality_calc_in"].max()
+        })
 
     return pd.DataFrame(intervalos)
 
@@ -872,11 +766,6 @@ except Exception as e:
     st.stop()
 
 
-nombre_archivo = archivo.name.upper()
-pozo_detectado = str(meta.get("pozo", "")).upper()
-es_aa9891 = "AA9891" in nombre_archivo or "AA9891" in pozo_detectado
-
-
 st.sidebar.header("Datos del casing")
 
 case_od = st.sidebar.number_input(
@@ -900,78 +789,13 @@ nominal_id = st.sidebar.number_input(
     format="%.3f"
 )
 
-st.sidebar.header("Criterios de alerta")
-
-umbral_problema = st.sidebar.slider(
-    "Umbral de problema mostrado, %",
-    10,
-    100,
-    60
-)
-
-ventana_sostenida_ft = st.sidebar.number_input(
-    "Ventana sostenida, ft",
-    value=5.0,
-    min_value=0.5,
-    max_value=50.0,
-    step=0.5,
-    format="%.1f"
-)
-
-restriction_ref = st.sidebar.number_input(
-    "Referencia restricción IDMN, in",
-    value=0.250,
-    step=0.010,
-    format="%.3f"
-)
-
-ovality_ref = st.sidebar.number_input(
-    "Referencia ovalidad, in",
-    value=0.250,
-    step=0.010,
-    format="%.3f"
-)
-
-eccentricity_ref = st.sidebar.number_input(
-    "Referencia excentricidad, in",
-    value=0.200,
-    step=0.010,
-    format="%.3f"
-)
-
-jump_ref = st.sidebar.number_input(
-    "Referencia salto brusco, in",
-    value=0.100,
-    step=0.010,
-    format="%.3f"
-)
-
-st.sidebar.header("Intervalo de interés manual")
-
-usar_intervalo_manual = st.sidebar.checkbox(
-    "Marcar intervalo manual en 3D",
-    value=es_aa9891
-)
-
-manual_from_ft = st.sidebar.number_input(
-    "Desde, ft",
-    value=350.0,
-    step=1.0,
-    format="%.1f"
-)
-
-manual_to_ft = st.sidebar.number_input(
-    "Hasta, ft",
-    value=425.0,
-    step=1.0,
-    format="%.1f"
-)
-
-manual_score_pct = st.sidebar.slider(
-    "Intensidad intervalo manual, %",
-    0,
-    100,
-    85
+tolerancia_buen_estado = st.sidebar.number_input(
+    "Tolerancia buen estado, %",
+    value=0.50,
+    min_value=0.0,
+    max_value=5.0,
+    step=0.10,
+    format="%.2f"
 )
 
 max_points = st.sidebar.slider(
@@ -996,12 +820,13 @@ st.write(f"Pozo: **{meta.get('pozo', '')}**")
 st.write(f"Campo: **{meta.get('campo', '')}**")
 
 
-st.subheader("Rangos de clasificación del problema mostrado")
-st.dataframe(RANGOS_PROBLEMA, use_container_width=True, hide_index=True)
+st.subheader("Rangos de clasificación")
+st.dataframe(RANGOS_ESTADO, use_container_width=True, hide_index=True)
 
 st.caption(
-    "Nota técnica: el score mostrado combina el cálculo del LAS con el intervalo manual, cuando está activado. "
-    "El intervalo manual sirve para marcar zonas observadas en el registro gráfico o en el reporte."
+    "Nota: desgaste se calcula con IDMX respecto al ID nominal. "
+    "Colapso se calcula con IDMN respecto al ID nominal. "
+    "El estado mostrado toma el efecto dominante entre desgaste y colapso."
 )
 
 
@@ -1059,15 +884,7 @@ try:
         case_od,
         nominal_id,
         wall_thickness,
-        restriction_ref,
-        ovality_ref,
-        eccentricity_ref,
-        jump_ref,
-        ventana_sostenida_ft,
-        usar_intervalo_manual,
-        manual_from_ft,
-        manual_to_ft,
-        manual_score_pct
+        tolerancia_buen_estado
     )
 except Exception as e:
     st.error(f"No pude procesar los datos: {e}")
@@ -1101,10 +918,10 @@ k1, k2, k3, k4, k5, k6 = st.columns(6)
 
 k1.metric("MD inicial", f"{data_filtrada['depth_ft'].min():.2f} ft")
 k2.metric("MD final", f"{data_filtrada['depth_ft'].max():.2f} ft")
-k3.metric("Máx. problema mostrado", f"{data_filtrada['problem_score_pct'].max():.1f} %")
-k4.metric("Máx. problema calculado", f"{data_filtrada['problem_score_calc_pct'].max():.1f} %")
+k3.metric("Máx. desgaste ID", f"{data_filtrada['desgaste_id_pct'].max():.2f} %")
+k4.metric("Máx. colapso ID", f"{data_filtrada['colapso_id_pct'].max():.2f} %")
 k5.metric("Menor IDMN", f"{data_filtrada['id_min_in'].min():.3f} in")
-k6.metric("Integridad mínima", f"{data_filtrada['integrity_pct'].min():.1f} %")
+k6.metric("Mayor IDMX", f"{data_filtrada['id_max_in'].max():.3f} in")
 
 
 fuera_rango = int(data_filtrada["out_of_physical_range"].sum())
@@ -1112,75 +929,55 @@ fuera_rango = int(data_filtrada["out_of_physical_range"].sum())
 if fuera_rango > 0:
     st.warning(
         f"Hay {fuera_rango} puntos donde IDMX supera el OD del casing. "
-        "Estos puntos deben revisarse como lectura fuera de rango físico o zona severa."
+        "Estos puntos deben revisarse como lectura fuera de rango físico."
     )
 
 
-if usar_intervalo_manual:
-    st.warning(
-        f"Intervalo manual activado: {manual_from_ft:.1f} ft a {manual_to_ft:.1f} ft "
-        f"con intensidad {manual_score_pct} %. Esta marca viene de interpretación visual o reporte, "
-        "no del cálculo automático puro del LAS."
-    )
-
-
-st.subheader("Tubular 3D coloreado por problema mostrado")
+st.subheader("Tubular 3D por estado del casing")
 st.info(
-    "Pasa el cursor sobre los puntos coloreados de la pared del casing para ver la lectura. "
-    "Ya no necesitas usar la línea negra central."
+    "Pasa el cursor sobre los puntos coloreados de la pared del casing para ver la lectura completa."
 )
 
 st.plotly_chart(
-    grafico_3d(data_filtrada, radial_cols, max_points, umbral_problema),
+    grafico_3d(data_filtrada, radial_cols, max_points),
     use_container_width=True
 )
 
 
-st.subheader("Tracks de problema mostrado, cálculo LAS e intervalo manual")
-st.plotly_chart(grafico_tracks(data_filtrada, umbral_problema), use_container_width=True)
+st.subheader("Track de estado del casing")
+st.plotly_chart(grafico_estado(data_filtrada), use_container_width=True)
 
 
 st.subheader("Tracks IDMN, IDAV e IDMX")
 st.plotly_chart(grafico_id(data_filtrada), use_container_width=True)
 
 
-st.subheader("Profundidades con mayor problema mostrado")
+st.subheader("Profundidades más críticas")
 
-top = data_filtrada.sort_values(
-    [
-        "problem_score_pct",
-        "manual_alert_pct",
-        "problem_score_calc_pct",
-        "restriction_score_sustained_pct",
-        "ovality_score_sustained_pct",
-        "metal_loss_pct",
-        "eccentricity_score_sustained_pct"
-    ],
-    ascending=[False, False, False, False, False, False, False]
+top = data_filtrada.copy()
+top["severidad_abs_pct"] = top["indice_color_pct"].abs()
+
+top = top.sort_values(
+    ["severidad_abs_pct", "desgaste_id_pct", "colapso_id_pct"],
+    ascending=[False, False, False]
 ).head(30)
 
 columnas_top = [
     "depth_ft",
-    "alert_type",
-    "problem_score_pct",
-    "problem_score_calc_pct",
-    "manual_alert_pct",
-    "spike_score_pct",
-    "problem_class",
-    "probable_cause",
+    "estado_casing",
+    "tipo_dominante",
+    "indice_color_pct",
+    "desgaste_id_pct",
+    "colapso_id_pct",
     "id_min_in",
     "id_avg_in",
     "id_max_in",
+    "desgaste_id_in",
+    "colapso_id_in",
+    "ovality_calc_in",
     "remaining_wall_in",
     "integrity_pct",
-    "metal_loss_pct",
-    "restriction_score_sustained_pct",
-    "id_restriction_min_in",
-    "ovality_calc_in",
-    "ovality_score_sustained_pct",
-    "eccentricity_in",
-    "eccentricity_score_sustained_pct",
-    "jump_score_sustained_pct",
+    "metal_loss_wall_pct",
     "out_of_physical_range"
 ]
 
@@ -1197,35 +994,20 @@ zona_350_450 = data[
 if zona_350_450.empty:
     st.info("El archivo no contiene datos entre 350 ft y 450 ft.")
 else:
+    zona_350_450["severidad_abs_pct"] = zona_350_450["indice_color_pct"].abs()
+
     st.dataframe(
-        zona_350_450.sort_values("problem_score_pct", ascending=False)[columnas_top].head(60).round(4),
+        zona_350_450.sort_values("severidad_abs_pct", ascending=False)[columnas_top].head(60).round(4),
         use_container_width=True
     )
 
 
-st.subheader("Picos puntuales que NO necesariamente son daño sostenido")
+st.subheader("Intervalos por estado")
 
-picos = data_filtrada[
-    (data_filtrada["spike_score_pct"] >= 60) &
-    (data_filtrada["problem_score_calc_pct"] < 35) &
-    (data_filtrada["manual_alert_pct"] == 0)
-].copy()
-
-if picos.empty:
-    st.success("No se detectaron picos puntuales aislados relevantes dentro del rango filtrado.")
-else:
-    st.dataframe(
-        picos.sort_values("spike_score_pct", ascending=False)[columnas_top].head(30).round(4),
-        use_container_width=True
-    )
-
-
-st.subheader("Intervalos críticos mostrados")
-
-intervalos = intervalos_criticos(data_filtrada, umbral_problema)
+intervalos = crear_intervalos(data_filtrada)
 
 if intervalos.empty:
-    st.success("No se detectaron intervalos por encima del umbral seleccionado.")
+    st.info("No se generaron intervalos.")
 else:
     st.dataframe(intervalos.round(4), use_container_width=True)
 
@@ -1234,43 +1016,29 @@ st.subheader("Tabla procesada completa")
 
 columnas_salida = [
     "depth_ft",
-    "alert_type",
-    "problem_score_pct",
-    "problem_score_calc_pct",
-    "manual_alert_pct",
-    "spike_score_pct",
-    "problem_class",
-    "probable_cause",
+    "estado_casing",
+    "tipo_dominante",
+    "indice_color_pct",
+    "desgaste_id_pct",
+    "colapso_id_pct",
     "id_min_in",
     "id_avg_in",
     "id_max_in",
     "case_od_in",
     "nominal_id_in",
     "nominal_wall_in",
-    "remaining_wall_raw_in",
-    "remaining_wall_in",
-    "integrity_raw_pct",
-    "integrity_pct",
-    "metal_loss_pct",
-    "id_enlargement_max_in",
-    "id_restriction_min_in",
+    "desgaste_id_in",
+    "colapso_id_in",
     "diameter_spread_in",
     "ovality_calc_in",
     "ovality_las_in",
     "eccentricity_in",
-    "wear_score_raw_pct",
-    "wear_score_sustained_pct",
-    "restriction_score_raw_pct",
-    "restriction_score_sustained_pct",
-    "ovality_score_raw_pct",
-    "ovality_score_sustained_pct",
-    "eccentricity_score_raw_pct",
-    "eccentricity_score_sustained_pct",
-    "jump_score_raw_pct",
-    "jump_score_sustained_pct",
-    "out_of_physical_range",
-    "integrity_class",
-    "smoothing_window_points"
+    "remaining_wall_raw_in",
+    "remaining_wall_in",
+    "integrity_raw_pct",
+    "integrity_pct",
+    "metal_loss_wall_pct",
+    "out_of_physical_range"
 ]
 
 st.dataframe(data_filtrada[columnas_salida].round(4), use_container_width=True)
@@ -1281,6 +1049,6 @@ csv = data_filtrada[columnas_salida].to_csv(index=False).encode("utf-8")
 st.download_button(
     "Descargar tabla procesada CSV",
     data=csv,
-    file_name="casing_integrity_final_analysis.csv",
+    file_name="casing_estado_por_id_nominal.csv",
     mime="text/csv"
 )
