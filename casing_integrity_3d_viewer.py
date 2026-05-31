@@ -11,9 +11,12 @@ st.set_page_config(page_title="Casing Integrity 3D Viewer", layout="wide")
 
 st.title("Casing Integrity 3D Viewer")
 st.caption(
-    "Sube un archivo LAS, Excel o CSV del registro caliper para ver el tubular en 3D "
-    "y detectar mayor desgaste."
+    "Sube un archivo LAS, Excel o CSV del registro caliper. "
+    "La app detecta desgaste, restricción, ovalidad, excentricidad y posibles zonas problemáticas del casing."
 )
+
+
+NULL_VALUES = [-999.25, -999.2500, -999, -999.0]
 
 
 def parse_float(texto, default=None):
@@ -33,7 +36,7 @@ def limpiar_numero(serie):
     return pd.to_numeric(
         serie.astype(str).str.replace(",", ".", regex=False),
         errors="coerce"
-    ).replace([-999.25, -999.2500, -999, -999.0], np.nan)
+    ).replace(NULL_VALUES, np.nan)
 
 
 def buscar_columna(columnas, opciones):
@@ -44,6 +47,28 @@ def buscar_columna(columnas, opciones):
             return columnas_limpias[opcion.upper()]
 
     return None
+
+
+def clasificar_integridad(integridad):
+    if integridad >= 80:
+        return "Aceptable"
+    if integridad >= 60:
+        return "Moderado"
+    if integridad >= 40:
+        return "Crítico"
+
+    return "Severo"
+
+
+def clasificar_problema(score):
+    if score >= 80:
+        return "Severo"
+    if score >= 60:
+        return "Crítico"
+    if score >= 35:
+        return "Moderado"
+
+    return "Bajo"
 
 
 def leer_las_desde_texto(texto):
@@ -82,7 +107,12 @@ def leer_las_desde_texto(texto):
         raise ValueError("No se encontró la sección ~A del archivo LAS.")
 
     if not curvas:
-        raise ValueError("No se encontraron curvas en la sección ~Curve.")
+        partes_a = lineas[indice_a].split()
+        if len(partes_a) > 1:
+            curvas = partes_a[1:]
+
+    if not curvas:
+        raise ValueError("No se encontraron curvas en el archivo LAS.")
 
     filas = []
 
@@ -107,18 +137,14 @@ def leer_las_desde_texto(texto):
         raise ValueError("No se encontraron datos numéricos en el LAS.")
 
     df = pd.DataFrame(filas, columns=curvas)
-    df = df.replace([-999.25, -999.2500, -999, -999.0], np.nan)
+    df = df.replace(NULL_VALUES, np.nan)
 
-    case_od = parse_float(parametros.get("CASEOD"), 4.500)
+    case_od = parse_float(parametros.get("CASEOD"), 5.500)
     case_id = parse_float(parametros.get("CASEID"), None)
-    case_thick = parse_float(parametros.get("CASETHCK"), 0.224)
+    case_thick = parse_float(parametros.get("CASETHCK"), 0.275)
 
     if case_id is None:
         case_id = case_od - 2 * case_thick
-
-    df["Case_OD"] = case_od
-    df["Nominal_ID"] = case_id
-    df["Wall_Thickness"] = case_thick
 
     meta = {
         "pozo": parametros.get("WELL", ""),
@@ -156,6 +182,7 @@ def leer_archivo(archivo):
             or "~VERSION" in texto_unido
             or "~Curve" in texto_unido
             or "~CURVE" in texto_unido
+            or "~A" in texto_unido
         ):
             return leer_las_desde_texto(texto_unido)
 
@@ -165,9 +192,9 @@ def leer_archivo(archivo):
             "pozo": "",
             "campo": "",
             "compania": "",
-            "case_od": 4.500,
-            "case_id": 4.052,
-            "case_thick": 0.224,
+            "case_od": 5.500,
+            "case_id": 4.950,
+            "case_thick": 0.275,
             "fuente": "Excel tabular"
         }
 
@@ -180,9 +207,9 @@ def leer_archivo(archivo):
             "pozo": "",
             "campo": "",
             "compania": "",
-            "case_od": 4.500,
-            "case_id": 4.052,
-            "case_thick": 0.224,
+            "case_od": 5.500,
+            "case_id": 4.950,
+            "case_thick": 0.275,
             "fuente": "CSV"
         }
 
@@ -191,15 +218,39 @@ def leer_archivo(archivo):
     raise ValueError("Formato no soportado. Usa LAS, Excel o CSV.")
 
 
-def clasificar(integridad):
-    if integridad >= 80:
-        return "Aceptable"
-    if integridad >= 60:
-        return "Moderado"
-    if integridad >= 40:
-        return "Crítico"
+def score_por_salto(serie, referencia):
+    s = pd.Series(serie).astype(float)
+    salto = s.diff().abs()
+    salto = salto.fillna(0)
 
-    return "Severo"
+    if referencia <= 0:
+        referencia = 0.10
+
+    return np.clip((salto / referencia) * 100, 0, 100)
+
+
+def crear_motivo(row):
+    motivos = []
+
+    if row["wear_score_pct"] >= 35:
+        motivos.append("aumento de IDMX o desgaste")
+
+    if row["restriction_score_pct"] >= 35:
+        motivos.append("reducción de IDMN o posible restricción")
+
+    if row["ovality_score_pct"] >= 35:
+        motivos.append("alta ovalidad")
+
+    if row["eccentricity_score_pct"] >= 35:
+        motivos.append("alta excentricidad")
+
+    if row["jump_score_pct"] >= 35:
+        motivos.append("cambio brusco de lectura")
+
+    if not motivos:
+        return "sin anomalía relevante"
+
+    return ", ".join(motivos)
 
 
 def procesar_datos(
@@ -208,11 +259,13 @@ def procesar_datos(
     col_idmn,
     col_idav,
     col_idmx,
-    col_id11,
-    col_id12,
     case_od,
     nominal_id,
-    wall_thickness
+    wall_thickness,
+    restriction_ref,
+    ovality_ref,
+    eccentricity_ref,
+    jump_ref
 ):
     data = pd.DataFrame()
 
@@ -221,22 +274,36 @@ def procesar_datos(
     data["id_avg_in"] = limpiar_numero(df[col_idav])
     data["id_max_in"] = limpiar_numero(df[col_idmx])
 
-    if col_id11:
-        data["id11_in"] = limpiar_numero(df[col_id11])
-    else:
-        data["id11_in"] = data["id_avg_in"]
-
-    if col_id12:
-        data["id12_in"] = limpiar_numero(df[col_id12])
-    else:
-        data["id12_in"] = data["id_avg_in"]
-
     data["case_od_in"] = case_od
     data["nominal_id_in"] = nominal_id
     data["nominal_wall_in"] = wall_thickness
 
+    col_ecc = buscar_columna(df.columns, ["ECCE", "ECC", "ECCENTERING"])
+    col_oval_las = buscar_columna(df.columns, ["OVAL", "OVALITY"])
+
+    if col_ecc:
+        data["eccentricity_in"] = limpiar_numero(df[col_ecc])
+    else:
+        data["eccentricity_in"] = np.nan
+
+    if col_oval_las:
+        data["ovality_las_in"] = limpiar_numero(df[col_oval_las])
+    else:
+        data["ovality_las_in"] = np.nan
+
+    id_arm_cols = []
+
+    for i in range(1, 25):
+        nombre = f"ID{i:02d}"
+        col = buscar_columna(df.columns, [nombre, f"ID{i}"])
+
+        if col:
+            nuevo = f"id{i:02d}_in"
+            data[nuevo] = limpiar_numero(df[col])
+            id_arm_cols.append(nuevo)
+
     data = data.dropna(subset=["depth_ft", "id_min_in", "id_avg_in", "id_max_in"])
-    data = data.sort_values("depth_ft")
+    data = data.sort_values("depth_ft").reset_index(drop=True)
 
     data["remaining_wall_raw_in"] = (data["case_od_in"] - data["id_max_in"]) / 2
     data["remaining_wall_in"] = data["remaining_wall_raw_in"].clip(lower=0)
@@ -245,60 +312,145 @@ def procesar_datos(
     data["integrity_pct"] = data["integrity_raw_pct"].clip(lower=0, upper=100)
 
     data["metal_loss_pct"] = 100 - data["integrity_pct"]
+    data["metal_loss_pct"] = data["metal_loss_pct"].clip(lower=0, upper=100)
+
     data["id_enlargement_max_in"] = data["id_max_in"] - data["nominal_id_in"]
-    data["ovality_in"] = data["id_max_in"] - data["id_min_in"]
+    data["id_restriction_min_in"] = data["nominal_id_in"] - data["id_min_in"]
+
+    data["diameter_spread_in"] = data["id_max_in"] - data["id_min_in"]
+    data["ovality_calc_in"] = data["diameter_spread_in"].clip(lower=0)
+
+    data["wear_score_pct"] = np.clip(
+        (data["id_enlargement_max_in"].clip(lower=0) / (2 * wall_thickness)) * 100,
+        0,
+        100
+    )
+
+    data["restriction_score_pct"] = np.clip(
+        (data["id_restriction_min_in"].clip(lower=0) / restriction_ref) * 100,
+        0,
+        100
+    )
+
+    data["ovality_score_pct"] = np.clip(
+        (data["ovality_calc_in"].clip(lower=0) / ovality_ref) * 100,
+        0,
+        100
+    )
+
+    data["eccentricity_score_pct"] = np.clip(
+        (data["eccentricity_in"].fillna(0).clip(lower=0) / eccentricity_ref) * 100,
+        0,
+        100
+    )
+
+    jump_idmn = score_por_salto(data["id_min_in"], jump_ref)
+    jump_idmx = score_por_salto(data["id_max_in"], jump_ref)
+
+    data["jump_score_pct"] = np.maximum(jump_idmn, jump_idmx)
+
+    data["problem_score_pct"] = data[
+        [
+            "wear_score_pct",
+            "restriction_score_pct",
+            "ovality_score_pct",
+            "eccentricity_score_pct",
+            "jump_score_pct"
+        ]
+    ].max(axis=1)
 
     data["out_of_physical_range"] = data["id_max_in"] > data["case_od_in"]
-    data["class"] = data["integrity_pct"].apply(clasificar)
+    data["integrity_class"] = data["integrity_pct"].apply(clasificar_integridad)
+    data["problem_class"] = data["problem_score_pct"].apply(clasificar_problema)
+    data["probable_cause"] = data.apply(crear_motivo, axis=1)
 
-    return data
+    return data, id_arm_cols
 
 
-def grafico_3d(data, max_points):
-    if len(data) > max_points:
-        indices = np.linspace(0, len(data) - 1, max_points).astype(int)
-        data = data.iloc[indices].copy()
+def textos_hover(data):
+    textos = []
 
-    theta = np.linspace(0, 2 * np.pi, 96)
+    for _, row in data.iterrows():
+        texto = (
+            f"<b>Lectura del casing</b><br>"
+            f"MD: {row['depth_ft']:.2f} ft<br>"
+            f"Problema casing: {row['problem_score_pct']:.1f} %<br>"
+            f"Clasificación problema: {row['problem_class']}<br>"
+            f"Desgaste por IDMX: {row['metal_loss_pct']:.1f} %<br>"
+            f"Integridad: {row['integrity_pct']:.1f} %<br>"
+            f"Espesor remanente: {row['remaining_wall_in']:.3f} in<br>"
+            f"IDMN: {row['id_min_in']:.3f} in<br>"
+            f"IDAV: {row['id_avg_in']:.3f} in<br>"
+            f"IDMX: {row['id_max_in']:.3f} in<br>"
+            f"Restricción IDMN: {row['id_restriction_min_in']:.3f} in<br>"
+            f"Ovalidad calculada: {row['ovality_calc_in']:.3f} in<br>"
+            f"Excentricidad: {row['eccentricity_in']:.3f} in<br>"
+            f"Motivo probable: {row['probable_cause']}"
+        )
+
+        textos.append(texto)
+
+    return textos
+
+
+def construir_superficie(data, id_arm_cols):
+    if len(id_arm_cols) >= 6:
+        ids = data[id_arm_cols].copy()
+
+        for col in id_arm_cols:
+            ids[col] = ids[col].fillna(data["id_avg_in"])
+
+        radios = ids.to_numpy(dtype=float) / 2
+        radios = np.clip(radios, 0, data["case_od_in"].to_numpy().reshape(-1, 1) / 2)
+
+        theta = np.linspace(0, 2 * np.pi, len(id_arm_cols), endpoint=False)
+
+        radios = np.column_stack([radios, radios[:, 0]])
+        theta = np.append(theta, 2 * np.pi)
+    else:
+        theta = np.linspace(0, 2 * np.pi, 72)
+
+        rx = data["id_max_in"].fillna(data["id_avg_in"]).to_numpy() / 2
+        ry = data["id_min_in"].fillna(data["id_avg_in"]).to_numpy() / 2
+
+        rx = np.clip(rx, 0, data["case_od_in"].to_numpy() / 2)
+        ry = np.clip(ry, 0, data["case_od_in"].to_numpy() / 2)
+
+        radios = []
+
+        for i in range(len(data)):
+            r = (rx[i] * ry[i]) / np.sqrt(
+                (ry[i] * np.cos(theta)) ** 2 +
+                (rx[i] * np.sin(theta)) ** 2
+            )
+            radios.append(r)
+
+        radios = np.array(radios)
+
     depth = data["depth_ft"].to_numpy()
-
-    id11 = data["id11_in"].fillna(data["id_avg_in"]).to_numpy()
-    id12 = data["id12_in"].fillna(data["id_avg_in"]).to_numpy()
-    case_od = data["case_od_in"].to_numpy()
-
-    id11 = np.minimum(id11, case_od)
-    id12 = np.minimum(id12, case_od)
-
-    rx = id11 / 2
-    ry = id12 / 2
-
     theta_grid, depth_grid = np.meshgrid(theta, depth)
 
-    rx_grid = np.repeat(rx.reshape(-1, 1), len(theta), axis=1)
-    ry_grid = np.repeat(ry.reshape(-1, 1), len(theta), axis=1)
-
-    x = rx_grid * np.cos(theta_grid)
-    y = ry_grid * np.sin(theta_grid)
+    x = radios * np.cos(theta_grid)
+    y = radios * np.sin(theta_grid)
     z = depth_grid
 
-    desgaste = data["metal_loss_pct"].fillna(0).to_numpy()
-    integridad = data["integrity_pct"].fillna(0).to_numpy()
-    espesor = data["remaining_wall_in"].fillna(0).to_numpy()
-    idmx = data["id_max_in"].fillna(0).to_numpy()
+    return x, y, z, theta
 
-    desgaste_grid = np.repeat(desgaste.reshape(-1, 1), len(theta), axis=1)
 
-    texto_lectura = [
-        (
-            f"<b>Lectura del casing</b><br>"
-            f"MD: {depth[i]:.2f} ft<br>"
-            f"Desgaste: {desgaste[i]:.1f} %<br>"
-            f"Integridad: {integridad[i]:.1f} %<br>"
-            f"Espesor remanente: {espesor[i]:.3f} in<br>"
-            f"IDMX: {idmx[i]:.3f} in"
-        )
-        for i in range(len(depth))
-    ]
+def grafico_3d(data, id_arm_cols, max_points, umbral_problema):
+    if len(data) > max_points:
+        indices = np.linspace(0, len(data) - 1, max_points).astype(int)
+        data_plot = data.iloc[indices].copy()
+    else:
+        data_plot = data.copy()
+
+    x, y, z, theta = construir_superficie(data_plot, id_arm_cols)
+
+    score = data_plot["problem_score_pct"].fillna(0).to_numpy()
+    score_grid = np.repeat(score.reshape(-1, 1), x.shape[1], axis=1)
+
+    textos = textos_hover(data_plot)
+    hover_grid = np.repeat(np.array(textos, dtype=object).reshape(-1, 1), x.shape[1], axis=1)
 
     fig = go.Figure()
 
@@ -307,39 +459,71 @@ def grafico_3d(data, max_points):
             x=x,
             y=y,
             z=z,
-            surfacecolor=desgaste_grid,
+            surfacecolor=score_grid,
+            text=hover_grid,
             cmin=0,
             cmax=100,
             colorscale=[
                 [0.00, "green"],
-                [0.40, "lightgreen"],
+                [0.35, "lightgreen"],
                 [0.60, "yellow"],
                 [0.80, "orange"],
                 [1.00, "red"],
             ],
-            colorbar=dict(title="Desgaste %"),
-            hoverinfo="skip",
-            showscale=True,
-            name="Tubular"
+            colorbar=dict(title="Problema casing %"),
+            hovertemplate="%{text}<extra></extra>",
+            hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
+            name="Casing"
         )
     )
 
     fig.add_trace(
         go.Scatter3d(
-            x=np.zeros(len(depth)),
-            y=np.zeros(len(depth)),
-            z=depth,
+            x=np.zeros(len(data_plot)),
+            y=np.zeros(len(data_plot)),
+            z=data_plot["depth_ft"],
             mode="lines+markers",
-            line=dict(width=6, color="black"),
+            line=dict(width=7, color="black"),
             marker=dict(size=4, color="black"),
-            text=texto_lectura,
+            text=textos,
             hovertemplate="%{text}<extra></extra>",
+            hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
             name="Línea de lectura"
         )
     )
 
+    crit = data_plot[data_plot["problem_score_pct"] >= umbral_problema].copy()
+
+    if not crit.empty:
+        if len(crit) > 120:
+            crit = crit.sort_values("problem_score_pct", ascending=False).head(120)
+            crit = crit.sort_values("depth_ft")
+
+        r_lateral = np.nanmax(np.sqrt(x ** 2 + y ** 2)) + 0.35
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=np.ones(len(crit)) * r_lateral,
+                y=np.zeros(len(crit)),
+                z=crit["depth_ft"],
+                mode="markers",
+                marker=dict(
+                    size=5,
+                    color=crit["problem_score_pct"],
+                    colorscale="Turbo",
+                    cmin=0,
+                    cmax=100,
+                    symbol="diamond"
+                ),
+                text=textos_hover(crit),
+                hovertemplate="%{text}<extra></extra>",
+                hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
+                name="Alertas"
+            )
+        )
+
     fig.update_layout(
-        height=750,
+        height=760,
         scene=dict(
             xaxis_title="X, in",
             yaxis_title="Y, in",
@@ -355,15 +539,51 @@ def grafico_3d(data, max_points):
     return fig
 
 
-def grafico_tracks(data):
+def grafico_tracks(data, umbral_problema):
     fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=data["problem_score_pct"],
+            y=data["depth_ft"],
+            mode="lines",
+            name="Problema casing, %"
+        )
+    )
 
     fig.add_trace(
         go.Scatter(
             x=data["metal_loss_pct"],
             y=data["depth_ft"],
             mode="lines",
-            name="Desgaste, %"
+            name="Desgaste por IDMX, %"
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=data["restriction_score_pct"],
+            y=data["depth_ft"],
+            mode="lines",
+            name="Restricción IDMN, %"
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=data["ovality_score_pct"],
+            y=data["depth_ft"],
+            mode="lines",
+            name="Ovalidad, %"
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=data["eccentricity_score_pct"],
+            y=data["depth_ft"],
+            mode="lines",
+            name="Excentricidad, %"
         )
     )
 
@@ -376,21 +596,63 @@ def grafico_tracks(data):
         )
     )
 
+    fig.add_vline(
+        x=umbral_problema,
+        line_dash="dash",
+        annotation_text="Umbral problema"
+    )
+
+    fig.update_layout(
+        height=560,
+        yaxis=dict(title="MD, ft", autorange="reversed"),
+        xaxis=dict(title="Score / porcentaje, %", range=[0, 100]),
+        legend=dict(orientation="h"),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+
+    return fig
+
+
+def grafico_id(data):
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=data["id_min_in"],
+            y=data["depth_ft"],
+            mode="lines",
+            name="IDMN"
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=data["id_avg_in"],
+            y=data["depth_ft"],
+            mode="lines",
+            name="IDAV"
+        )
+    )
+
     fig.add_trace(
         go.Scatter(
             x=data["id_max_in"],
             y=data["depth_ft"],
             mode="lines",
-            name="IDMX, in",
-            xaxis="x2"
+            name="IDMX"
         )
     )
 
+    nominal = float(data["nominal_id_in"].iloc[0])
+    od = float(data["case_od_in"].iloc[0])
+
+    fig.add_vline(x=nominal, line_dash="dash", annotation_text="ID nominal")
+    fig.add_vline(x=od, line_dash="dot", annotation_text="OD casing")
+
     fig.update_layout(
-        height=520,
+        height=560,
         yaxis=dict(title="MD, ft", autorange="reversed"),
-        xaxis=dict(title="Integridad / desgaste, %", range=[0, 100]),
-        xaxis2=dict(title="IDMX, in", overlaying="x", side="top"),
+        xaxis=dict(title="Diámetro interno, in"),
         legend=dict(orientation="h"),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -400,7 +662,7 @@ def grafico_tracks(data):
 
 def intervalos_criticos(data, umbral):
     data = data.sort_values("depth_ft").copy()
-    data["critico"] = data["integrity_pct"] < umbral
+    data["critico"] = data["problem_score_pct"] >= umbral
 
     intervalos = []
     bloque = []
@@ -415,11 +677,16 @@ def intervalos_criticos(data, umbral):
                 intervalos.append({
                     "from_ft": b["depth_ft"].min(),
                     "to_ft": b["depth_ft"].max(),
-                    "min_integrity_pct": b["integrity_pct"].min(),
+                    "max_problem_score_pct": b["problem_score_pct"].max(),
                     "max_metal_loss_pct": b["metal_loss_pct"].max(),
-                    "min_wall_in": b["remaining_wall_in"].min(),
-                    "max_id_in": b["id_max_in"].max(),
-                    "max_ovality_in": b["ovality_in"].max()
+                    "max_restriction_score_pct": b["restriction_score_pct"].max(),
+                    "max_ovality_score_pct": b["ovality_score_pct"].max(),
+                    "max_eccentricity_score_pct": b["eccentricity_score_pct"].max(),
+                    "min_integrity_pct": b["integrity_pct"].min(),
+                    "min_idmn_in": b["id_min_in"].min(),
+                    "max_idmx_in": b["id_max_in"].max(),
+                    "probable_cause": b.sort_values("problem_score_pct", ascending=False)["probable_cause"].iloc[0],
+                    "class": clasificar_problema(b["problem_score_pct"].max())
                 })
 
                 bloque = []
@@ -430,11 +697,16 @@ def intervalos_criticos(data, umbral):
         intervalos.append({
             "from_ft": b["depth_ft"].min(),
             "to_ft": b["depth_ft"].max(),
-            "min_integrity_pct": b["integrity_pct"].min(),
+            "max_problem_score_pct": b["problem_score_pct"].max(),
             "max_metal_loss_pct": b["metal_loss_pct"].max(),
-            "min_wall_in": b["remaining_wall_in"].min(),
-            "max_id_in": b["id_max_in"].max(),
-            "max_ovality_in": b["ovality_in"].max()
+            "max_restriction_score_pct": b["restriction_score_pct"].max(),
+            "max_ovality_score_pct": b["ovality_score_pct"].max(),
+            "max_eccentricity_score_pct": b["eccentricity_score_pct"].max(),
+            "min_integrity_pct": b["integrity_pct"].min(),
+            "min_idmn_in": b["id_min_in"].min(),
+            "max_idmx_in": b["id_max_in"].max(),
+            "probable_cause": b.sort_values("problem_score_pct", ascending=False)["probable_cause"].iloc[0],
+            "class": clasificar_problema(b["problem_score_pct"].max())
         })
 
     return pd.DataFrame(intervalos)
@@ -477,10 +749,57 @@ wall_thickness = st.sidebar.number_input(
     format="%.3f"
 )
 
-nominal_id = case_od - 2 * wall_thickness
+nominal_id = st.sidebar.number_input(
+    "ID nominal, in",
+    value=float(case_od - 2 * wall_thickness),
+    step=0.001,
+    format="%.3f"
+)
 
-umbral = st.sidebar.slider("Umbral crítico de integridad, %", 10, 100, 60)
-max_points = st.sidebar.slider("Puntos máximos para 3D", 200, 3000, 1200, 100)
+st.sidebar.header("Criterios de alerta")
+
+umbral_problema = st.sidebar.slider(
+    "Umbral de problema casing, %",
+    10,
+    100,
+    60
+)
+
+restriction_ref = st.sidebar.number_input(
+    "Referencia restricción IDMN, in",
+    value=0.250,
+    step=0.010,
+    format="%.3f"
+)
+
+ovality_ref = st.sidebar.number_input(
+    "Referencia ovalidad, in",
+    value=0.250,
+    step=0.010,
+    format="%.3f"
+)
+
+eccentricity_ref = st.sidebar.number_input(
+    "Referencia excentricidad, in",
+    value=0.200,
+    step=0.010,
+    format="%.3f"
+)
+
+jump_ref = st.sidebar.number_input(
+    "Referencia salto brusco, in",
+    value=0.100,
+    step=0.010,
+    format="%.3f"
+)
+
+max_points = st.sidebar.slider(
+    "Puntos máximos para 3D",
+    200,
+    3000,
+    1200,
+    100
+)
 
 
 st.subheader("Resumen del archivo")
@@ -506,13 +825,10 @@ depth_default = buscar_columna(columnas, ["DEPT", "Depth"])
 idmn_default = buscar_columna(columnas, ["IDMN"])
 idav_default = buscar_columna(columnas, ["IDAV"])
 idmx_default = buscar_columna(columnas, ["IDMX"])
-id11_default = buscar_columna(columnas, ["ID11"])
-id12_default = buscar_columna(columnas, ["ID12"])
-
 
 st.subheader("Mapeo de columnas")
 
-m1, m2, m3 = st.columns(3)
+m1, m2, m3, m4 = st.columns(4)
 
 with m1:
     col_depth = st.selectbox(
@@ -521,53 +837,42 @@ with m1:
         index=columnas.index(depth_default) if depth_default in columnas else 0
     )
 
+with m2:
     col_idmn = st.selectbox(
         "ID mínimo",
         columnas,
         index=columnas.index(idmn_default) if idmn_default in columnas else 0
     )
 
-with m2:
+with m3:
     col_idav = st.selectbox(
         "ID promedio",
         columnas,
         index=columnas.index(idav_default) if idav_default in columnas else 0
     )
 
+with m4:
     col_idmx = st.selectbox(
         "ID máximo",
         columnas,
         index=columnas.index(idmx_default) if idmx_default in columnas else 0
     )
 
-with m3:
-    opciones = [None] + columnas
-
-    col_id11 = st.selectbox(
-        "Diámetro 11",
-        opciones,
-        index=opciones.index(id11_default) if id11_default in opciones else 0
-    )
-
-    col_id12 = st.selectbox(
-        "Diámetro 12",
-        opciones,
-        index=opciones.index(id12_default) if id12_default in opciones else 0
-    )
-
 
 try:
-    data = procesar_datos(
+    data, id_arm_cols = procesar_datos(
         df,
         col_depth,
         col_idmn,
         col_idav,
         col_idmx,
-        col_id11,
-        col_id12,
         case_od,
         nominal_id,
-        wall_thickness
+        wall_thickness,
+        restriction_ref,
+        ovality_ref,
+        eccentricity_ref,
+        jump_ref
     )
 except Exception as e:
     st.error(f"No pude procesar los datos: {e}")
@@ -597,13 +902,14 @@ data_filtrada = data[
 ].copy()
 
 
-k1, k2, k3, k4, k5 = st.columns(5)
+k1, k2, k3, k4, k5, k6 = st.columns(6)
 
 k1.metric("MD inicial", f"{data_filtrada['depth_ft'].min():.2f} ft")
 k2.metric("MD final", f"{data_filtrada['depth_ft'].max():.2f} ft")
-k3.metric("Integridad mínima", f"{data_filtrada['integrity_pct'].min():.1f} %")
+k3.metric("Máx. problema", f"{data_filtrada['problem_score_pct'].max():.1f} %")
 k4.metric("Mayor desgaste", f"{data_filtrada['metal_loss_pct'].max():.1f} %")
-k5.metric("Espesor mínimo", f"{data_filtrada['remaining_wall_in'].min():.3f} in")
+k5.metric("Menor IDMN", f"{data_filtrada['id_min_in'].min():.3f} in")
+k6.metric("Integridad mínima", f"{data_filtrada['integrity_pct'].min():.1f} %")
 
 
 fuera_rango = int(data_filtrada["out_of_physical_range"].sum())
@@ -611,49 +917,89 @@ fuera_rango = int(data_filtrada["out_of_physical_range"].sum())
 if fuera_rango > 0:
     st.warning(
         f"Hay {fuera_rango} puntos donde IDMX supera el OD del casing. "
-        "Esos puntos aparecen como 100 % de desgaste, pero deben revisarse como posible dato anómalo o lectura fuera de rango físico."
+        "Estos puntos deben revisarse como lectura fuera de rango físico o zona severa."
     )
 
 
-st.subheader("Tubular 3D coloreado por desgaste")
-st.info("Para ver la lectura exacta, pasa el mouse sobre la línea negra vertical del tubular.")
-st.plotly_chart(grafico_3d(data_filtrada, max_points), use_container_width=True)
+st.subheader("Tubular 3D coloreado por problema del casing")
+st.info(
+    "Pasa el cursor sobre el casing o sobre la línea negra central para ver MD, problema, desgaste, "
+    "integridad, IDMN, IDAV, IDMX, espesor remanente y motivo probable."
+)
+
+st.plotly_chart(
+    grafico_3d(data_filtrada, id_arm_cols, max_points, umbral_problema),
+    use_container_width=True
+)
 
 
-st.subheader("Tracks de integridad, desgaste e IDMX")
-st.plotly_chart(grafico_tracks(data_filtrada), use_container_width=True)
+st.subheader("Tracks de problema, desgaste, restricción, ovalidad e integridad")
+st.plotly_chart(grafico_tracks(data_filtrada, umbral_problema), use_container_width=True)
 
 
-st.subheader("Profundidades con mayor desgaste")
+st.subheader("Tracks IDMN, IDAV e IDMX")
+st.plotly_chart(grafico_id(data_filtrada), use_container_width=True)
+
+
+st.subheader("Profundidades con mayor problema de casing")
 
 top = data_filtrada.sort_values(
-    ["metal_loss_pct", "id_enlargement_max_in", "id_max_in"],
-    ascending=[False, False, False]
-).head(20)
+    [
+        "problem_score_pct",
+        "restriction_score_pct",
+        "ovality_score_pct",
+        "metal_loss_pct",
+        "eccentricity_score_pct"
+    ],
+    ascending=[False, False, False, False, False]
+).head(30)
 
 columnas_top = [
     "depth_ft",
-    "id_max_in",
-    "id_avg_in",
+    "problem_score_pct",
+    "problem_class",
+    "probable_cause",
     "id_min_in",
+    "id_avg_in",
+    "id_max_in",
     "remaining_wall_in",
     "integrity_pct",
     "metal_loss_pct",
-    "id_enlargement_max_in",
-    "ovality_in",
-    "out_of_physical_range",
-    "class"
+    "restriction_score_pct",
+    "id_restriction_min_in",
+    "ovality_calc_in",
+    "ovality_score_pct",
+    "eccentricity_in",
+    "eccentricity_score_pct",
+    "jump_score_pct",
+    "out_of_physical_range"
 ]
 
 st.dataframe(top[columnas_top].round(4), use_container_width=True)
 
 
+st.subheader("Revisión rápida de zona 300 ft a 450 ft")
+
+zona_300_450 = data[
+    (data["depth_ft"] >= 300) &
+    (data["depth_ft"] <= 450)
+].copy()
+
+if zona_300_450.empty:
+    st.info("El archivo no contiene datos entre 300 ft y 450 ft.")
+else:
+    st.dataframe(
+        zona_300_450.sort_values("problem_score_pct", ascending=False)[columnas_top].head(30).round(4),
+        use_container_width=True
+    )
+
+
 st.subheader("Intervalos críticos")
 
-intervalos = intervalos_criticos(data_filtrada, umbral)
+intervalos = intervalos_criticos(data_filtrada, umbral_problema)
 
 if intervalos.empty:
-    st.success("No se detectaron intervalos por debajo del umbral seleccionado.")
+    st.success("No se detectaron intervalos por encima del umbral seleccionado.")
 else:
     st.dataframe(intervalos.round(4), use_container_width=True)
 
@@ -665,8 +1011,6 @@ columnas_salida = [
     "id_min_in",
     "id_avg_in",
     "id_max_in",
-    "id11_in",
-    "id12_in",
     "case_od_in",
     "nominal_id_in",
     "nominal_wall_in",
@@ -676,9 +1020,21 @@ columnas_salida = [
     "integrity_pct",
     "metal_loss_pct",
     "id_enlargement_max_in",
-    "ovality_in",
+    "id_restriction_min_in",
+    "diameter_spread_in",
+    "ovality_calc_in",
+    "ovality_las_in",
+    "eccentricity_in",
+    "wear_score_pct",
+    "restriction_score_pct",
+    "ovality_score_pct",
+    "eccentricity_score_pct",
+    "jump_score_pct",
+    "problem_score_pct",
+    "problem_class",
+    "probable_cause",
     "out_of_physical_range",
-    "class"
+    "integrity_class"
 ]
 
 st.dataframe(data_filtrada[columnas_salida].round(4), use_container_width=True)
@@ -689,6 +1045,6 @@ csv = data_filtrada[columnas_salida].to_csv(index=False).encode("utf-8")
 st.download_button(
     "Descargar tabla procesada CSV",
     data=csv,
-    file_name="casing_integrity_processed.csv",
+    file_name="casing_integrity_problem_analysis.csv",
     mime="text/csv"
 )
