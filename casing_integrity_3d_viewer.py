@@ -47,6 +47,10 @@ COLOR_SCALE_ESTADO = [
 ]
 
 
+# ============================================================
+# UTILIDADES GENERALES
+# ============================================================
+
 def parse_float(texto, default=None):
     if texto is None:
         return default
@@ -137,6 +141,62 @@ def tipo_signed(valor, tolerancia):
 
     return "Desgaste"
 
+
+def seleccionar_indices_3d(data, max_points):
+    """
+    Selecciona puntos para el 3D sin perder eventos críticos puntuales.
+    Mantiene una muestra base por profundidad y fuerza la inclusión de los mayores
+    eventos de desgaste, colapso y lecturas fuera de rango físico.
+    """
+    n = len(data)
+
+    if n <= max_points:
+        return np.arange(n)
+
+    tmp = data.reset_index(drop=True).copy()
+    tmp["_pos"] = np.arange(n)
+    tmp["_severidad"] = tmp[["desgaste_id_pct", "colapso_id_pct"]].max(axis=1)
+
+    criticos = tmp[
+        (tmp["desgaste_id_pct"] >= 10) |
+        (tmp["colapso_id_pct"] >= 10) |
+        (tmp["out_of_physical_range"] == True)
+    ].copy()
+
+    top_colapso = tmp.nlargest(100, "colapso_id_pct")["_pos"].tolist()
+    top_desgaste = tmp.nlargest(100, "desgaste_id_pct")["_pos"].tolist()
+
+    posiciones_criticas = set(criticos["_pos"].tolist())
+    posiciones_criticas.update(top_colapso)
+    posiciones_criticas.update(top_desgaste)
+
+    crit_df = tmp[tmp["_pos"].isin(posiciones_criticas)].copy()
+    crit_df = crit_df.sort_values("_severidad", ascending=False)
+
+    max_criticos = max(60, int(max_points * 0.45))
+    posiciones_criticas = crit_df.head(max_criticos)["_pos"].tolist()
+
+    puntos_base = max(60, max_points - len(posiciones_criticas))
+    base_idx = np.linspace(0, n - 1, puntos_base).astype(int).tolist()
+
+    indices = sorted(set(base_idx).union(set(posiciones_criticas)))
+
+    if len(indices) > max_points:
+        crit_set = set(posiciones_criticas)
+        base_sin_criticos = [i for i in base_idx if i not in crit_set]
+        faltantes = max_points - len(crit_set)
+
+        if faltantes > 0:
+            indices = sorted(list(crit_set) + base_sin_criticos[:faltantes])
+        else:
+            indices = sorted(posiciones_criticas[:max_points])
+
+    return np.array(indices, dtype=int)
+
+
+# ============================================================
+# LECTURA LAS / EXCEL / CSV
+# ============================================================
 
 def leer_las_desde_texto(texto):
     lineas = texto.splitlines()
@@ -287,6 +347,10 @@ def leer_archivo(archivo):
 
     raise ValueError("Formato no soportado. Usa LAS, Excel o CSV.")
 
+
+# ============================================================
+# DETECCIÓN Y PROCESAMIENTO
+# ============================================================
 
 def detectar_columnas_r(df):
     cols = []
@@ -465,9 +529,28 @@ def procesar_datos(
             diam_col = f"D_{etiqueta}_in"
 
             if r_es_radio:
-                data[diam_col] = data[col] * 2.0
+                diametro_calculado = data[col] * 2.0
             else:
-                data[diam_col] = data[col]
+                diametro_calculado = data[col]
+
+            # Respaldo: si R viene inválido, usar ID equivalente del mismo brazo.
+            numero_brazo = etiqueta.replace("R", "")
+            id_equivalente = f"ID{numero_brazo}_in"
+
+            if id_equivalente in data.columns:
+                diametro_calculado = diametro_calculado.mask(
+                    (diametro_calculado <= 0.5) |
+                    (diametro_calculado > data["case_od_in"] * 1.5),
+                    data[id_equivalente]
+                )
+
+            diametro_calculado = diametro_calculado.mask(
+                (diametro_calculado <= 0.5) |
+                (diametro_calculado > data["case_od_in"] * 1.5),
+                np.nan
+            )
+
+            data[diam_col] = diametro_calculado
 
             info["arm_value_cols"].append(col)
             info["arm_diam_cols"].append(diam_col)
@@ -494,6 +577,10 @@ def procesar_datos(
 
     return data, info
 
+
+# ============================================================
+# GEOMETRÍA 3D
+# ============================================================
 
 def obtener_geometria(data, info, puntos_circunferencia):
     depth = data["depth_ft"].to_numpy()
@@ -630,13 +717,10 @@ def grafico_3d(
     tolerancia_buen_estado,
     hover_detallado=False
 ):
-    max_surface_points = min(max_points, 700)
+    max_surface_points = min(max_points, 900)
 
-    if len(data) > max_surface_points:
-        indices = np.linspace(0, len(data) - 1, max_surface_points).astype(int)
-        data_plot = data.iloc[indices].copy()
-    else:
-        data_plot = data.copy()
+    indices = seleccionar_indices_3d(data, max_surface_points)
+    data_plot = data.iloc[indices].copy().reset_index(drop=True)
 
     x, y, z, theta, radios, diametros, etiquetas = obtener_geometria(
         data_plot,
@@ -684,18 +768,20 @@ def grafico_3d(
     color_hover = []
     text_hover = []
 
+    x_crit = []
+    y_crit = []
+    z_crit = []
+    color_crit = []
+    text_crit = []
+    severidad_crit = []
+
     paso_depth = max(1, len(data_plot) // 220)
     paso_theta = max(1, radios.shape[1] // 18)
 
-    for i in range(0, len(data_plot), paso_depth):
+    for i in range(len(data_plot)):
         row = data_plot.iloc[i]
 
-        for j in range(0, radios.shape[1], paso_theta):
-            x_hover.append(radios[i, j] * np.cos(theta[j]))
-            y_hover.append(radios[i, j] * np.sin(theta[j]))
-            z_hover.append(row["depth_ft"])
-            color_hover.append(indice_color[i, j])
-
+        for j in range(radios.shape[1]):
             etiqueta = etiquetas[j] if j < len(etiquetas) else f"P{j + 1:02d}"
 
             if len(info["arm_value_cols"]) >= 6 and j < len(info["arm_value_cols"]):
@@ -721,7 +807,20 @@ def grafico_3d(
                     info
                 )
 
-            text_hover.append(texto)
+            if i % paso_depth == 0 and j % paso_theta == 0:
+                x_hover.append(radios[i, j] * np.cos(theta[j]))
+                y_hover.append(radios[i, j] * np.sin(theta[j]))
+                z_hover.append(row["depth_ft"])
+                color_hover.append(indice_color[i, j])
+                text_hover.append(texto)
+
+            if abs(indice_color[i, j]) >= 10:
+                x_crit.append(radios[i, j] * np.cos(theta[j]))
+                y_crit.append(radios[i, j] * np.sin(theta[j]))
+                z_crit.append(row["depth_ft"])
+                color_crit.append(indice_color[i, j])
+                text_crit.append(texto)
+                severidad_crit.append(abs(indice_color[i, j]))
 
     fig.add_trace(
         go.Scatter3d(
@@ -735,7 +834,7 @@ def grafico_3d(
                 colorscale=COLOR_SCALE_ESTADO,
                 cmin=-100,
                 cmax=100,
-                opacity=0.55
+                opacity=0.45
             ),
             hovertext=text_hover,
             hovertemplate="%{hovertext}<extra></extra>",
@@ -748,10 +847,51 @@ def grafico_3d(
         )
     )
 
+    if len(x_crit) > 0:
+        crit_df = pd.DataFrame(
+            {
+                "x": x_crit,
+                "y": y_crit,
+                "z": z_crit,
+                "color": color_crit,
+                "texto": text_crit,
+                "severidad": severidad_crit
+            }
+        )
+
+        crit_df = crit_df.sort_values("severidad", ascending=False).head(1500)
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=crit_df["x"],
+                y=crit_df["y"],
+                z=crit_df["z"],
+                mode="markers",
+                marker=dict(
+                    size=7,
+                    symbol="diamond",
+                    color=crit_df["color"],
+                    colorscale=COLOR_SCALE_ESTADO,
+                    cmin=-100,
+                    cmax=100,
+                    opacity=0.95,
+                    line=dict(width=1, color="black")
+                ),
+                hovertext=crit_df["texto"],
+                hovertemplate="%{hovertext}<extra></extra>",
+                hoverlabel=dict(
+                    bgcolor="white",
+                    font_size=12,
+                    font_color="black"
+                ),
+                name="Puntos críticos ≥ 10%"
+            )
+        )
+
     fig.add_annotation(
         text=(
             "<b>Escala:</b> Azul/Morado = colapso | Verde = nominal | "
-            "Amarillo/Rojo = desgaste. Pasa el cursor sobre los puntos para ver detalle."
+            "Amarillo/Rojo = desgaste. Los diamantes marcan eventos críticos ≥ 10%."
         ),
         xref="paper",
         yref="paper",
@@ -781,6 +921,10 @@ def grafico_3d(
 
     return fig
 
+
+# ============================================================
+# GRÁFICAS 2D Y TABLAS
+# ============================================================
 
 def grafico_estado(data):
     plot = data.sort_values("depth_ft").copy()
@@ -1063,6 +1207,10 @@ def crear_intervalos(data):
     return pd.DataFrame(intervalos)
 
 
+# ============================================================
+# INTERFAZ STREAMLIT
+# ============================================================
+
 with st.sidebar:
     st.header("Archivo")
 
@@ -1127,7 +1275,7 @@ max_points = st.sidebar.slider(
     "Puntos máximos para 3D",
     100,
     1500,
-    400,
+    500,
     100
 )
 
@@ -1285,8 +1433,8 @@ st.plotly_chart(grafico_id(data_filtrada), use_container_width=True)
 st.subheader("Tubular 3D por estado del casing")
 
 st.info(
-    "Para evitar que Streamlit se quede cargando, el tubular 3D no se genera automáticamente. "
-    "Presiona el botón cuando quieras visualizarlo. Para archivos pesados usa 300 a 500 puntos y 36 a 48 puntos de circunferencia."
+    "El tubular 3D incluye una muestra base más los puntos críticos de desgaste/colapso. "
+    "Los diamantes marcan eventos críticos ≥ 10%, para que no se pierdan eventos puntuales."
 )
 
 b1, b2 = st.columns([1, 1])
