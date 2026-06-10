@@ -869,7 +869,7 @@ def grafico_3d(
                 mode="markers",
                 marker=dict(
                     size=7,
-                    symbol="diamond",
+                    symbol="circle",
                     color=crit_df["color"],
                     colorscale=COLOR_SCALE_ESTADO,
                     cmin=-100,
@@ -891,7 +891,7 @@ def grafico_3d(
     fig.add_annotation(
         text=(
             "<b>Escala:</b> Azul/Morado = colapso | Verde = nominal | "
-            "Amarillo/Rojo = desgaste. Los diamantes marcan eventos críticos ≥ 10%."
+            "Amarillo/Rojo = desgaste. Los puntos resaltados marcan eventos críticos ≥ 10%."
         ),
         xref="paper",
         yref="paper",
