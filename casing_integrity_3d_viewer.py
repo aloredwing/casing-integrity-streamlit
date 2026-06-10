@@ -71,6 +71,18 @@ def fmt(valor, decimales=2, unidad=""):
         return "N/D"
 
 
+def insertar_columna_despues(lista_columnas, nueva_columna, despues_de):
+    columnas = [col for col in lista_columnas if col != nueva_columna]
+
+    if despues_de in columnas:
+        indice = columnas.index(despues_de) + 1
+        columnas.insert(indice, nueva_columna)
+    else:
+        columnas.insert(0, nueva_columna)
+
+    return columnas
+
+
 def limpiar_numero(serie):
     return pd.to_numeric(
         serie.astype(str).str.replace(",", ".", regex=False),
@@ -554,7 +566,31 @@ def matriz_color_3d(data, diametros, tolerancia):
     return indice
 
 
-def texto_hover_punto(row, etiqueta, valor_original, diametro, indice, info):
+def texto_hover_punto_simple(row, etiqueta, diametro, indice, info):
+    estado = clasificar_signed_pct(indice, 0.0)
+
+    texto = (
+        f"<b>Lectura del casing</b><br>"
+        f"MD: {fmt(row['depth_ft'], 2, ' ft')}<br>"
+        f"Modo geometría: {info['modo_geometria']}<br>"
+        f"Punto/Brazo: {etiqueta}<br>"
+        f"Diámetro equivalente: {fmt(diametro, 3, ' in')}<br>"
+        f"Estado punto: {estado}<br>"
+        f"Índice punto vs ID nominal: {fmt(indice, 2, ' %')}<br>"
+        f"Estado dominante fila: {row['estado_casing']}<br>"
+        f"Desgaste IDMX: {fmt(row['desgaste_id_pct'], 2, ' %')}<br>"
+        f"Colapso IDMN: {fmt(row['colapso_id_pct'], 2, ' %')}<br>"
+        f"IDMN: {fmt(row['id_min_in'], 3, ' in')}<br>"
+        f"IDAV: {fmt(row['id_avg_in'], 3, ' in')}<br>"
+        f"IDMX: {fmt(row['id_max_in'], 3, ' in')}<br>"
+        f"Espesor remanente: {fmt(row['remaining_wall_in'], 3, ' in')}<br>"
+        f"Integridad: {fmt(row['integrity_pct'], 1, ' %')}"
+    )
+
+    return texto
+
+
+def texto_hover_punto_detallado(row, etiqueta, valor_original, diametro, indice, info):
     estado = clasificar_signed_pct(indice, 0.0)
 
     texto = (
@@ -586,9 +622,18 @@ def texto_hover_punto(row, etiqueta, valor_original, diametro, indice, info):
     return texto
 
 
-def grafico_3d(data, info, max_points, puntos_circunferencia, tolerancia_buen_estado):
-    if len(data) > max_points:
-        indices = np.linspace(0, len(data) - 1, max_points).astype(int)
+def grafico_3d(
+    data,
+    info,
+    max_points,
+    puntos_circunferencia,
+    tolerancia_buen_estado,
+    hover_detallado=False
+):
+    max_surface_points = min(max_points, 700)
+
+    if len(data) > max_surface_points:
+        indices = np.linspace(0, len(data) - 1, max_surface_points).astype(int)
         data_plot = data.iloc[indices].copy()
     else:
         data_plot = data.copy()
@@ -639,10 +684,13 @@ def grafico_3d(data, info, max_points, puntos_circunferencia, tolerancia_buen_es
     color_hover = []
     text_hover = []
 
-    for i in range(len(data_plot)):
+    paso_depth = max(1, len(data_plot) // 220)
+    paso_theta = max(1, radios.shape[1] // 18)
+
+    for i in range(0, len(data_plot), paso_depth):
         row = data_plot.iloc[i]
 
-        for j in range(radios.shape[1]):
+        for j in range(0, radios.shape[1], paso_theta):
             x_hover.append(radios[i, j] * np.cos(theta[j]))
             y_hover.append(radios[i, j] * np.sin(theta[j]))
             z_hover.append(row["depth_ft"])
@@ -655,8 +703,8 @@ def grafico_3d(data, info, max_points, puntos_circunferencia, tolerancia_buen_es
             else:
                 valor_original = diametros[i, j]
 
-            text_hover.append(
-                texto_hover_punto(
+            if hover_detallado:
+                texto = texto_hover_punto_detallado(
                     row,
                     etiqueta,
                     valor_original,
@@ -664,7 +712,16 @@ def grafico_3d(data, info, max_points, puntos_circunferencia, tolerancia_buen_es
                     indice_color[i, j],
                     info
                 )
-            )
+            else:
+                texto = texto_hover_punto_simple(
+                    row,
+                    etiqueta,
+                    diametros[i, j],
+                    indice_color[i, j],
+                    info
+                )
+
+            text_hover.append(texto)
 
     fig.add_trace(
         go.Scatter3d(
@@ -673,27 +730,28 @@ def grafico_3d(data, info, max_points, puntos_circunferencia, tolerancia_buen_es
             z=z_hover,
             mode="markers",
             marker=dict(
-                size=5,
+                size=4,
                 color=color_hover,
                 colorscale=COLOR_SCALE_ESTADO,
                 cmin=-100,
                 cmax=100,
-                opacity=0.35
+                opacity=0.55
             ),
             hovertext=text_hover,
             hovertemplate="%{hovertext}<extra></extra>",
-            hoverlabel=dict(bgcolor="white", font_size=13, font_color="black"),
+            hoverlabel=dict(
+                bgcolor="white",
+                font_size=12,
+                font_color="black"
+            ),
             name="Lectura sobre casing"
         )
     )
 
     fig.add_annotation(
         text=(
-            "<b>Escala:</b> Colapso crítico ≤ -40% | Colapso severo -20% a -40% | "
-            "Colapso moderado -10% a -20% | Colapso leve 0% a -10% | "
-            "Buen estado ≈ ID nominal | Desgaste leve 0% a 10% | "
-            "Desgaste moderado 10% a 20% | Desgaste severo 20% a 40% | "
-            "Desgaste crítico ≥ 40%"
+            "<b>Escala:</b> Azul/Morado = colapso | Verde = nominal | "
+            "Amarillo/Rojo = desgaste. Pasa el cursor sobre los puntos para ver detalle."
         ),
         xref="paper",
         yref="paper",
@@ -707,7 +765,7 @@ def grafico_3d(data, info, max_points, puntos_circunferencia, tolerancia_buen_es
     )
 
     fig.update_layout(
-        height=820,
+        height=780,
         scene=dict(
             xaxis_title="X, in",
             yaxis_title="Y, in",
@@ -820,26 +878,25 @@ def grafico_estado(data):
         )
     )
 
-    if "indice_color_pct" in plot.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=plot["indice_color_pct"],
-                y=plot["depth_ft"],
-                mode="lines",
-                name="Índice dominante",
-                line=dict(width=1.5, dash="dash", color="#111827"),
-                customdata=custom,
-                hovertemplate=(
-                    "<b>MD:</b> %{y:.2f} ft<br>"
-                    "<b>Índice dominante:</b> %{x:.2f} %<br>"
-                    "<b>Estado dominante:</b> %{customdata[8]}<br>"
-                    "<b>Tipo dominante:</b> %{customdata[9]}<br>"
-                    "<b>Desgaste IDMX:</b> %{customdata[0]:.2f} %<br>"
-                    "<b>Colapso IDMN:</b> %{customdata[1]:.2f} %"
-                    "<extra></extra>"
-                )
+    fig.add_trace(
+        go.Scatter(
+            x=plot["indice_color_pct"],
+            y=plot["depth_ft"],
+            mode="lines",
+            name="Índice dominante",
+            line=dict(width=1.5, dash="dash", color="#111827"),
+            customdata=custom,
+            hovertemplate=(
+                "<b>MD:</b> %{y:.2f} ft<br>"
+                "<b>Índice dominante:</b> %{x:.2f} %<br>"
+                "<b>Estado dominante:</b> %{customdata[8]}<br>"
+                "<b>Tipo dominante:</b> %{customdata[9]}<br>"
+                "<b>Desgaste IDMX:</b> %{customdata[0]:.2f} %<br>"
+                "<b>Colapso IDMN:</b> %{customdata[1]:.2f} %"
+                "<extra></extra>"
             )
         )
+    )
 
     fig.add_vline(
         x=0,
@@ -871,7 +928,7 @@ def grafico_estado(data):
             )
 
     fig.add_annotation(
-        text="<b>Lectura:</b> Izquierda (-) = Colapso / reducción de diámetro | Derecha (+) = Desgaste / aumento de diámetro",
+        text="<b>Lectura:</b> Izquierda (-) = colapso / reducción de diámetro | Derecha (+) = desgaste / aumento de diámetro",
         xref="paper",
         yref="paper",
         x=0.01,
@@ -1020,6 +1077,13 @@ if archivo is None:
     st.stop()
 
 
+archivo_id = f"{archivo.name}_{len(archivo.getvalue())}"
+
+if st.session_state.get("archivo_id_casing") != archivo_id:
+    st.session_state["archivo_id_casing"] = archivo_id
+    st.session_state["mostrar_3d_casing"] = False
+
+
 try:
     df, meta = leer_archivo(archivo)
 except Exception as e:
@@ -1061,18 +1125,23 @@ tolerancia_buen_estado = st.sidebar.number_input(
 
 max_points = st.sidebar.slider(
     "Puntos máximos para 3D",
-    200,
-    3000,
-    1200,
+    100,
+    1500,
+    400,
     100
 )
 
 puntos_circunferencia = st.sidebar.slider(
     "Puntos de circunferencia si no hay R01-R24",
     24,
-    144,
     96,
+    48,
     12
+)
+
+hover_detallado = st.sidebar.checkbox(
+    "Hover detallado en 3D",
+    value=False
 )
 
 
@@ -1199,23 +1268,6 @@ if fuera_rango > 0:
     )
 
 
-st.subheader("Tubular 3D por estado del casing")
-st.info(
-    "Pasa el cursor sobre los puntos del casing para ver profundidad, diámetro, % desgaste, % colapso e integridad."
-)
-
-st.plotly_chart(
-    grafico_3d(
-        data_filtrada,
-        info,
-        max_points,
-        puntos_circunferencia,
-        tolerancia_buen_estado
-    ),
-    use_container_width=True
-)
-
-
 st.subheader("Track 2D de desgaste y colapso")
 st.info(
     "Interpretación: hacia la derecha (+) es desgaste o aumento de diámetro; "
@@ -1228,6 +1280,42 @@ st.plotly_chart(grafico_estado(data_filtrada), use_container_width=True)
 
 st.subheader("Tracks IDMN, IDAV, IDMX, ID11 e ID12")
 st.plotly_chart(grafico_id(data_filtrada), use_container_width=True)
+
+
+st.subheader("Tubular 3D por estado del casing")
+
+st.info(
+    "Para evitar que Streamlit se quede cargando, el tubular 3D no se genera automáticamente. "
+    "Presiona el botón cuando quieras visualizarlo. Para archivos pesados usa 300 a 500 puntos y 36 a 48 puntos de circunferencia."
+)
+
+b1, b2 = st.columns([1, 1])
+
+with b1:
+    if st.button("Generar / actualizar tubular 3D", type="primary"):
+        st.session_state["mostrar_3d_casing"] = True
+
+with b2:
+    if st.button("Ocultar tubular 3D"):
+        st.session_state["mostrar_3d_casing"] = False
+
+if st.session_state.get("mostrar_3d_casing", False):
+    with st.spinner("Generando tubular 3D... espera unos segundos."):
+        fig_3d = grafico_3d(
+            data_filtrada,
+            info,
+            max_points,
+            puntos_circunferencia,
+            tolerancia_buen_estado,
+            hover_detallado=hover_detallado
+        )
+
+    st.plotly_chart(
+        fig_3d,
+        use_container_width=True
+    )
+else:
+    st.warning("El tubular 3D todavía no está generado. Presiona el botón azul para visualizarlo.")
 
 
 st.subheader("Profundidades críticas reales")
@@ -1281,29 +1369,55 @@ else:
 
     desgaste_top = data_critica[
         data_critica["desgaste_id_pct"] > tolerancia_buen_estado
-    ].sort_values(
-        ["desgaste_id_pct", "id_max_in"],
+    ].copy()
+
+    desgaste_top["grado_evento_pct"] = desgaste_top["desgaste_id_pct"]
+
+    desgaste_top = desgaste_top.sort_values(
+        ["grado_evento_pct", "id_max_in"],
         ascending=[False, False]
     ).head(30)
+
+    columnas_desgaste = insertar_columna_despues(
+        columnas_criticas,
+        "grado_evento_pct",
+        "depth_ft"
+    )
 
     if desgaste_top.empty:
         st.success("No se detectó desgaste relevante dentro del rango seleccionado.")
     else:
-        st.dataframe(desgaste_top[columnas_criticas].round(4), use_container_width=True)
+        st.dataframe(
+            desgaste_top[columnas_desgaste].round(4),
+            use_container_width=True
+        )
 
     st.markdown("### Mayor colapso o reducción de diámetro")
 
     colapso_top = data_critica[
         data_critica["colapso_id_pct"] > tolerancia_buen_estado
-    ].sort_values(
-        ["colapso_id_pct", "id_min_in"],
+    ].copy()
+
+    colapso_top["grado_evento_pct"] = colapso_top["colapso_id_pct"]
+
+    colapso_top = colapso_top.sort_values(
+        ["grado_evento_pct", "id_min_in"],
         ascending=[False, True]
     ).head(30)
+
+    columnas_colapso = insertar_columna_despues(
+        columnas_criticas,
+        "grado_evento_pct",
+        "depth_ft"
+    )
 
     if colapso_top.empty:
         st.success("No se detectó colapso relevante dentro del rango seleccionado.")
     else:
-        st.dataframe(colapso_top[columnas_criticas].round(4), use_container_width=True)
+        st.dataframe(
+            colapso_top[columnas_colapso].round(4),
+            use_container_width=True
+        )
 
     st.markdown("### Profundidades con ambos efectos: desgaste y colapso")
 
@@ -1315,19 +1429,23 @@ else:
     if ambos_top.empty:
         st.info("No se detectaron profundidades con desgaste y colapso simultáneo por encima de la tolerancia.")
     else:
-        ambos_top["suma_eventos_pct"] = ambos_top["desgaste_id_pct"] + ambos_top["colapso_id_pct"]
+        ambos_top["grado_evento_pct"] = ambos_top["desgaste_id_pct"] + ambos_top["colapso_id_pct"]
 
         ambos_top = ambos_top.sort_values(
-            ["suma_eventos_pct", "desgaste_id_pct", "colapso_id_pct"],
+            ["grado_evento_pct", "desgaste_id_pct", "colapso_id_pct"],
             ascending=[False, False, False]
         ).head(30)
 
-        columnas_ambos = columnas_criticas.copy()
+        columnas_ambos = insertar_columna_despues(
+            columnas_criticas,
+            "grado_evento_pct",
+            "depth_ft"
+        )
 
-        if "suma_eventos_pct" not in columnas_ambos:
-            columnas_ambos.insert(6, "suma_eventos_pct")
-
-        st.dataframe(ambos_top[columnas_ambos].round(4), use_container_width=True)
+        st.dataframe(
+            ambos_top[columnas_ambos].round(4),
+            use_container_width=True
+        )
 
 
 st.subheader("Intervalos por estado dominante")
