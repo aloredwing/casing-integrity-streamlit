@@ -725,31 +725,188 @@ def grafico_3d(data, info, max_points, puntos_circunferencia, tolerancia_buen_es
 
 
 def grafico_estado(data):
+    plot = data.sort_values("depth_ft").copy()
+
+    columnas_necesarias = [
+        "desgaste_id_pct",
+        "colapso_id_pct",
+        "id_min_in",
+        "id_avg_in",
+        "id_max_in",
+        "nominal_id_in",
+        "remaining_wall_in",
+        "integrity_pct",
+        "estado_casing",
+        "tipo_dominante"
+    ]
+
+    for col in columnas_necesarias:
+        if col not in plot.columns:
+            plot[col] = 0
+
+    custom = plot[
+        [
+            "desgaste_id_pct",
+            "colapso_id_pct",
+            "id_min_in",
+            "id_avg_in",
+            "id_max_in",
+            "nominal_id_in",
+            "remaining_wall_in",
+            "integrity_pct",
+            "estado_casing",
+            "tipo_dominante"
+        ]
+    ].to_numpy()
+
+    max_desgaste = float(plot["desgaste_id_pct"].max()) if not plot.empty else 5
+    max_colapso = float(plot["colapso_id_pct"].max()) if not plot.empty else 5
+
+    lim_pos = max(5, max_desgaste * 1.25)
+    lim_neg = max(5, max_colapso * 1.25)
+
+    lim_pos = min(max(lim_pos, 5), 100)
+    lim_neg = min(max(lim_neg, 5), 100)
+
     fig = go.Figure()
 
     fig.add_trace(
         go.Scatter(
-            x=data["indice_color_pct"],
-            y=data["depth_ft"],
+            x=plot["desgaste_id_pct"],
+            y=plot["depth_ft"],
             mode="lines",
-            name="Índice estado casing, %"
+            name="Desgaste IDMX, %",
+            line=dict(width=2.2, color="#e11d48"),
+            customdata=custom,
+            hovertemplate=(
+                "<b>MD:</b> %{y:.2f} ft<br>"
+                "<b>Estado dominante:</b> %{customdata[8]}<br>"
+                "<b>Tipo dominante:</b> %{customdata[9]}<br>"
+                "<b>Desgaste IDMX:</b> %{customdata[0]:.2f} %<br>"
+                "<b>Colapso IDMN:</b> %{customdata[1]:.2f} %<br>"
+                "<b>ID nominal:</b> %{customdata[5]:.3f} in<br>"
+                "<b>IDMN:</b> %{customdata[2]:.3f} in<br>"
+                "<b>IDAV:</b> %{customdata[3]:.3f} in<br>"
+                "<b>IDMX:</b> %{customdata[4]:.3f} in<br>"
+                "<b>Espesor remanente:</b> %{customdata[6]:.3f} in<br>"
+                "<b>Integridad:</b> %{customdata[7]:.1f} %"
+                "<extra></extra>"
+            )
         )
     )
 
-    fig.add_vline(x=-40, line_dash="dot", annotation_text="Colapso crítico")
-    fig.add_vline(x=-20, line_dash="dot", annotation_text="Colapso severo")
-    fig.add_vline(x=-10, line_dash="dot", annotation_text="Colapso moderado")
-    fig.add_vline(x=0, line_dash="dash", annotation_text="ID nominal")
-    fig.add_vline(x=10, line_dash="dot", annotation_text="Desgaste moderado")
-    fig.add_vline(x=20, line_dash="dot", annotation_text="Desgaste severo")
-    fig.add_vline(x=40, line_dash="dot", annotation_text="Desgaste crítico")
+    fig.add_trace(
+        go.Scatter(
+            x=-plot["colapso_id_pct"],
+            y=plot["depth_ft"],
+            mode="lines",
+            name="Colapso IDMN, %",
+            line=dict(width=2.2, color="#2563eb"),
+            customdata=custom,
+            hovertemplate=(
+                "<b>MD:</b> %{y:.2f} ft<br>"
+                "<b>Estado dominante:</b> %{customdata[8]}<br>"
+                "<b>Tipo dominante:</b> %{customdata[9]}<br>"
+                "<b>Colapso IDMN:</b> %{customdata[1]:.2f} %<br>"
+                "<b>Desgaste IDMX:</b> %{customdata[0]:.2f} %<br>"
+                "<b>ID nominal:</b> %{customdata[5]:.3f} in<br>"
+                "<b>IDMN:</b> %{customdata[2]:.3f} in<br>"
+                "<b>IDAV:</b> %{customdata[3]:.3f} in<br>"
+                "<b>IDMX:</b> %{customdata[4]:.3f} in<br>"
+                "<b>Espesor remanente:</b> %{customdata[6]:.3f} in<br>"
+                "<b>Integridad:</b> %{customdata[7]:.1f} %"
+                "<extra></extra>"
+            )
+        )
+    )
+
+    if "indice_color_pct" in plot.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=plot["indice_color_pct"],
+                y=plot["depth_ft"],
+                mode="lines",
+                name="Índice dominante",
+                line=dict(width=1.5, dash="dash", color="#111827"),
+                customdata=custom,
+                hovertemplate=(
+                    "<b>MD:</b> %{y:.2f} ft<br>"
+                    "<b>Índice dominante:</b> %{x:.2f} %<br>"
+                    "<b>Estado dominante:</b> %{customdata[8]}<br>"
+                    "<b>Tipo dominante:</b> %{customdata[9]}<br>"
+                    "<b>Desgaste IDMX:</b> %{customdata[0]:.2f} %<br>"
+                    "<b>Colapso IDMN:</b> %{customdata[1]:.2f} %"
+                    "<extra></extra>"
+                )
+            )
+        )
+
+    fig.add_vline(
+        x=0,
+        line_dash="dash",
+        line_width=2,
+        line_color="black",
+        annotation_text="ID nominal",
+        annotation_position="top"
+    )
+
+    referencias = [
+        (-40, "Colapso crítico"),
+        (-20, "Colapso severo"),
+        (-10, "Colapso moderado"),
+        (10, "Desgaste moderado"),
+        (20, "Desgaste severo"),
+        (40, "Desgaste crítico"),
+    ]
+
+    for x, texto in referencias:
+        if -lim_neg <= x <= lim_pos:
+            fig.add_vline(
+                x=x,
+                line_dash="dot",
+                line_width=1.5,
+                line_color="black",
+                annotation_text=texto,
+                annotation_position="top"
+            )
+
+    fig.add_annotation(
+        text="<b>Lectura:</b> Izquierda (-) = Colapso / reducción de diámetro | Derecha (+) = Desgaste / aumento de diámetro",
+        xref="paper",
+        yref="paper",
+        x=0.01,
+        y=1.11,
+        showarrow=False,
+        align="left",
+        bgcolor="rgba(255,255,255,0.95)",
+        bordercolor="#cbd5e1",
+        borderwidth=1,
+        font=dict(size=12)
+    )
 
     fig.update_layout(
-        height=560,
-        yaxis=dict(title="MD, ft", autorange="reversed"),
-        xaxis=dict(title="Desviación respecto al ID nominal, %", range=[-100, 100]),
-        legend=dict(orientation="h"),
-        margin=dict(l=20, r=20, t=50, b=20),
+        height=620,
+        template="plotly_white",
+        title="Track 2D de desgaste y colapso",
+        xaxis=dict(
+            title="Desviación respecto al ID nominal, %",
+            range=[-lim_neg, lim_pos],
+            zeroline=True,
+            zerolinewidth=2
+        ),
+        yaxis=dict(
+            title="MD, ft",
+            autorange="reversed"
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0
+        ),
+        hovermode="closest",
+        margin=dict(l=20, r=20, t=95, b=20)
     )
 
     return fig
@@ -1044,8 +1201,7 @@ if fuera_rango > 0:
 
 st.subheader("Tubular 3D por estado del casing")
 st.info(
-    "Para EA9423 debe salir como tubo/elipse suave, no como triángulo. "
-    "Pasa el cursor sobre los puntos del casing para ver la lectura."
+    "Pasa el cursor sobre los puntos del casing para ver profundidad, diámetro, % desgaste, % colapso e integridad."
 )
 
 st.plotly_chart(
@@ -1060,7 +1216,13 @@ st.plotly_chart(
 )
 
 
-st.subheader("Track de estado del casing")
+st.subheader("Track 2D de desgaste y colapso")
+st.info(
+    "Interpretación: hacia la derecha (+) es desgaste o aumento de diámetro; "
+    "hacia la izquierda (-) es colapso o reducción de diámetro. "
+    "El hover muestra el % de desgaste y % de colapso a cada profundidad."
+)
+
 st.plotly_chart(grafico_estado(data_filtrada), use_container_width=True)
 
 
@@ -1115,7 +1277,8 @@ columnas_criticas = [col for col in columnas_criticas if col in data_critica.col
 if data_critica.empty:
     st.warning("No hay datos dentro del rango seleccionado.")
 else:
-    st.markdown("### Mayor desgaste")
+    st.markdown("### Mayor desgaste o aumento de diámetro")
+
     desgaste_top = data_critica[
         data_critica["desgaste_id_pct"] > tolerancia_buen_estado
     ].sort_values(
@@ -1129,6 +1292,7 @@ else:
         st.dataframe(desgaste_top[columnas_criticas].round(4), use_container_width=True)
 
     st.markdown("### Mayor colapso o reducción de diámetro")
+
     colapso_top = data_critica[
         data_critica["colapso_id_pct"] > tolerancia_buen_estado
     ].sort_values(
@@ -1141,8 +1305,32 @@ else:
     else:
         st.dataframe(colapso_top[columnas_criticas].round(4), use_container_width=True)
 
+    st.markdown("### Profundidades con ambos efectos: desgaste y colapso")
 
-st.subheader("Intervalos por estado")
+    ambos_top = data_critica[
+        (data_critica["desgaste_id_pct"] > tolerancia_buen_estado) &
+        (data_critica["colapso_id_pct"] > tolerancia_buen_estado)
+    ].copy()
+
+    if ambos_top.empty:
+        st.info("No se detectaron profundidades con desgaste y colapso simultáneo por encima de la tolerancia.")
+    else:
+        ambos_top["suma_eventos_pct"] = ambos_top["desgaste_id_pct"] + ambos_top["colapso_id_pct"]
+
+        ambos_top = ambos_top.sort_values(
+            ["suma_eventos_pct", "desgaste_id_pct", "colapso_id_pct"],
+            ascending=[False, False, False]
+        ).head(30)
+
+        columnas_ambos = columnas_criticas.copy()
+
+        if "suma_eventos_pct" not in columnas_ambos:
+            columnas_ambos.insert(6, "suma_eventos_pct")
+
+        st.dataframe(ambos_top[columnas_ambos].round(4), use_container_width=True)
+
+
+st.subheader("Intervalos por estado dominante")
 
 intervalos = crear_intervalos(data_filtrada)
 
